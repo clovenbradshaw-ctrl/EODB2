@@ -52,17 +52,58 @@ export function createMemoryStore(opts?: {
   // itself on settle, so the set is a live view of outstanding writes.
   const pendingPersistence = new Set<Promise<void>>();
 
-  function rangeKeys(prefix: string, opts?: IteratorOpts): string[] {
-    const all = [...kv.keys()].filter((k) => k.startsWith(prefix));
-    all.sort();
+  // ─── Sorted-key index ──────────────────────────────────────────────────
+  //
+  // `rangeKeys` used to spread + filter + sort the entire keyspace on every
+  // call. A paged scan of a 100k-record table (200 pages) therefore re-sorted
+  // ~100k keys 200 times — the dominant cost of opening a large table.
+  //
+  // Instead we cache the sorted key list and invalidate it only when the SET
+  // of keys changes (a brand-new key, or a deletion). Value-only updates
+  // (`put` on an existing key, the `meta:seq` bump) leave it valid. Each
+  // `rangeKeys` call is then a binary search + a linear walk of just the
+  // requested page.
+  let sortedKeys: string[] | null = null;
 
-    let result = all;
-    if (opts?.afterKey) {
-      const idx = all.findIndex((k) => k > opts.afterKey!);
-      result = idx < 0 ? [] : all.slice(idx);
+  function invalidateSortedKeys(): void {
+    sortedKeys = null;
+  }
+
+  function getSortedKeys(): string[] {
+    if (sortedKeys === null) {
+      sortedKeys = [...kv.keys()].sort();
     }
-    if (opts?.limit !== undefined) {
-      result = result.slice(0, opts.limit);
+    return sortedKeys;
+  }
+
+  /** First index into `sorted` whose key is >= `target` (binary search). */
+  function lowerBound(sorted: string[], target: string): number {
+    let lo = 0;
+    let hi = sorted.length;
+    while (lo < hi) {
+      const mid = (lo + hi) >>> 1;
+      if (sorted[mid] < target) lo = mid + 1;
+      else hi = mid;
+    }
+    return lo;
+  }
+
+  function rangeKeys(prefix: string, opts?: IteratorOpts): string[] {
+    const sorted = getSortedKeys();
+    // Page starts at `prefix`, or strictly after `afterKey` when it is a
+    // cursor inside the prefix range.
+    const afterKey = opts?.afterKey;
+    const startKey = afterKey && afterKey > prefix ? afterKey : prefix;
+    let i = lowerBound(sorted, startKey);
+    if (afterKey !== undefined && sorted[i] === afterKey) i++;
+
+    const result: string[] = [];
+    const limit = opts?.limit;
+    for (; i < sorted.length; i++) {
+      const k = sorted[i];
+      if (!k.startsWith(prefix)) break; // sorted — once out of range, done
+      result.push(k);
+      if (limit !== undefined && result.length >= limit) break;
     }
     return result;
   }
@@ -73,6 +114,9 @@ export function createMemoryStore(opts?: {
     },
 
     async put(key: string, value: unknown): Promise<void> {
+      // A brand-new key changes the sorted key set; a value-only update
+      // does not.
+      if (!kv.has(key)) invalidateSortedKeys();
       kv.set(key, value);
       // Forward event writes to the OPFS fold worker for durability.
       // The forward is fire-and-forget for latency, but if persistFn
@@ -90,7 +134,7 @@ export function createMemoryStore(opts?: {
     },
 
     async del(key: string): Promise<void> {
-      kv.delete(key);
+      if (kv.delete(key)) invalidateSortedKeys();
     },
 
     async iterator(prefix: string, opts?: IteratorOpts): Promise<[string, unknown][]> {
@@ -99,6 +143,7 @@ export function createMemoryStore(opts?: {
 
     async nextSeq(): Promise<number> {
       currentSeq++;
+      if (!kv.has('meta:seq')) invalidateSortedKeys();
       kv.set('meta:seq', currentSeq);
       return currentSeq;
     },
