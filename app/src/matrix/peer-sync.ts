@@ -27,6 +27,8 @@ import { getKeyById, resolveSnapshotKeyId } from '../crypto/segment-keys';
 import { encryptPeerPayload, decryptPeerPayload } from '../crypto/snapshot-crypto';
 import { selectTransport, executeSync, type TransportRouterDeps, type PeerInfo } from './transport-router';
 import type { WebRTCPeer } from './webrtc-peer';
+import { sendEoEvent } from './event-bridge';
+import { enqueueOfflineEvent, flushOfflineQueue } from './offline-queue';
 
 const _syncTypes = peerSyncEventTypes();
 const SYNC_HELLO = _syncTypes.hello;
@@ -67,6 +69,9 @@ export class PeerSync {
 
   /** Periodic heartbeat timer — re-announces presence so late-joining peers can sync. */
   private heartbeatTimer: ReturnType<typeof setInterval> | null = null;
+
+  /** `window` online-event handler — flushes the offline queue on reconnect. */
+  private onlineHandler?: () => void;
 
   /**
    * Serialization chain for to-device handler invocations.
@@ -210,6 +215,30 @@ export class PeerSync {
         console.warn('[EO-DB] PeerSync heartbeat failed:', e);
       });
     }, HEARTBEAT_INTERVAL_MS);
+
+    // Flush any events parked offline (this session or a prior one) to the
+    // room timeline, and re-flush on every reconnect — the canonical log
+    // must catch up with local edits made while the homeserver was away.
+    void this.flushOffline();
+    if (typeof window !== 'undefined') {
+      this.onlineHandler = () => { void this.flushOffline(); };
+      window.addEventListener('online', this.onlineHandler);
+    }
+  }
+
+  /**
+   * Push any offline-queued events to the room timeline. Best-effort — an
+   * event that still fails stays queued (no attempt cap) for the next
+   * reconnect, so a real edit is never dropped.
+   */
+  private async flushOffline(): Promise<void> {
+    try {
+      await flushOfflineQueue(this.roomId, (ev) =>
+        sendEoEvent(this.client, this.roomId, ev).then(() => {}),
+      );
+    } catch (e) {
+      console.warn('[EO-DB] PeerSync: offline-queue flush failed:', e);
+    }
   }
 
   /**
@@ -223,6 +252,10 @@ export class PeerSync {
     if (this.toDeviceHandler) {
       this.client.removeListener('toDeviceEvent' as any, this.toDeviceHandler);
       this.toDeviceHandler = undefined;
+    }
+    if (this.onlineHandler && typeof window !== 'undefined') {
+      window.removeEventListener('online', this.onlineHandler);
+      this.onlineHandler = undefined;
     }
   }
 
@@ -494,6 +527,20 @@ export class PeerSync {
    * handshake if this message is lost.
    */
   async broadcastLocalEvent(event: EoEvent): Promise<void> {
+    // Canonical write. Every edit goes into the Matrix room timeline so it
+    // becomes part of the durable, auditable log and is sealed into a block.
+    // If the homeserver is unreachable the event is parked in a durable
+    // offline queue and retried on reconnect — a real edit is never lost.
+    // (The to-device broadcast below is only the fast live-propagation
+    // layer; it does not make an event canonical.)
+    try {
+      await sendEoEvent(this.client, this.roomId, event);
+    } catch {
+      await enqueueOfflineEvent(this.roomId, event).catch((e) => {
+        console.warn('[EO-DB] PeerSync: failed to queue offline event:', e);
+      });
+    }
+
     const room = this.client.getRoom(this.roomId);
     if (!room) return;
     const myUserId = this.client.getUserId();
