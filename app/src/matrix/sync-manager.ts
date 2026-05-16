@@ -604,16 +604,20 @@ export class SyncManager {
     });
   }
 
-  /** Max retry attempts before dropping a permanently-failing queued event. */
-  private static readonly MAX_QUEUE_ATTEMPTS = 5;
-
   /**
    * Flush queued offline events to the room.
    *
    * Tries every event independently — a failure on event #2 does NOT
    * prevent event #3 from being attempted. Successfully sent events are
-   * removed from the queue; failed ones stay for the next flush cycle
-   * up to MAX_QUEUE_ATTEMPTS, after which they are dropped.
+   * removed from the queue.
+   *
+   * Matrix is the source of truth: an event that has not reached the room
+   * is not yet part of the canonical, auditable record. A transient send
+   * failure therefore NEVER drops the event — it stays queued and is
+   * retried on every future reconnect, with no attempt cap. The queue is
+   * durable in IndexedDB, so this survives reloads. Only a genuinely
+   * permanent rejection (the homeserver will never accept the event) drops
+   * it, and that is surfaced to the user via `onEventDropped`.
    *
    * Backwards-compatible: legacy queue entries (raw EoEventInput without
    * an `attempts` field) are auto-wrapped on read.
@@ -657,16 +661,11 @@ export class SyncManager {
             );
             dropped++;
           } else {
-            const attempts = entry.attempts + 1;
-            if (attempts < SyncManager.MAX_QUEUE_ATTEMPTS) {
-              remaining.push({ event: entry.event, attempts });
-            } else {
-              console.warn(
-                '[EO-DB] Dropping queued event after', attempts, 'failed attempts:',
-                entry.event.client_event_id,
-              );
-              dropped++;
-            }
+            // Transient failure (offline again, 5xx, rate-limit). The event
+            // has not reached Matrix — the source of truth — so it stays
+            // queued and is retried on the next reconnect, with no cap.
+            // `attempts` is kept for diagnostics but never drops the event.
+            remaining.push({ event: entry.event, attempts: entry.attempts + 1 });
           }
         }
       }

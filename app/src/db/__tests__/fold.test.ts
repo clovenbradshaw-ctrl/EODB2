@@ -79,7 +79,8 @@ describe('Fold engine (browser port)', () => {
     await processEvent(store, FIXTURES[0]);
     const state = await getState(store, 'app.tblClients.rec001');
     expect(state).not.toBeNull();
-    expect(state!.value).toEqual({ name: 'Maria Garcia', status: 'active' });
+    // toMatchObject — `value` also carries `_writes` provenance metadata.
+    expect(state!.value).toMatchObject({ name: 'Maria Garcia', status: 'active' });
     expect(state!.last_op).toBe('INS');
     expect(state!.last_agent).toBe('@test:matrix.example.com');
   });
