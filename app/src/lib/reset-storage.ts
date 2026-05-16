@@ -29,6 +29,12 @@
  *     a re-sync re-derives them.
  */
 
+import {
+  clearOpfsSpaceDirs,
+  clearOpfsRootFiles,
+  deleteMatrixCryptoDbs,
+} from './session-lifecycle';
+
 const OPFS_FILES_TO_REMOVE = [
   // Local-mode (no spaceId) writes these directly under the OPFS root.
   // Worker-managed; safe to delete while no worker is running.
@@ -49,87 +55,18 @@ export interface ResetReport {
 }
 
 export async function resetLocalStorage(): Promise<ResetReport> {
-  const report: ResetReport = {
-    spacesRemoved: 0,
-    rootFilesRemoved: 0,
-    cryptoDbsRemoved: 0,
-    errors: [],
-  };
+  // OPFS space dirs, OPFS root local-mode files, and the Matrix crypto IDB
+  // are all purged via the shared primitives in lib/session-lifecycle.ts —
+  // the same code logout uses, so the two paths can no longer drift apart.
+  // localStorage is intentionally left intact (see the module comment): the
+  // reset escape hatch must not log the user out.
+  const [spacesRemoved, rootFilesRemoved, cryptoDbsRemoved] = await Promise.all([
+    clearOpfsSpaceDirs(),
+    clearOpfsRootFiles(OPFS_FILES_TO_REMOVE),
+    deleteMatrixCryptoDbs(),
+  ]);
 
-  // ── OPFS ────────────────────────────────────────────────────────────────
-  try {
-    const root = await navigator.storage.getDirectory();
-
-    // Iterate every entry in the root and remove anything that matches a
-    // known EO-DB artifact. We avoid `for await` on a typed handle because
-    // the `entries()` async iterator isn't in the lib.dom typings yet.
-    const entries: AsyncIterable<[string, FileSystemHandle]> = (
-      root as unknown as { entries(): AsyncIterable<[string, FileSystemHandle]> }
-    ).entries();
-
-    for await (const [name] of entries) {
-      const isSpaceDir = name.startsWith('space.');
-      const isKnownRootFile = OPFS_FILES_TO_REMOVE.includes(name);
-      if (!isSpaceDir && !isKnownRootFile) continue;
-      try {
-        await root.removeEntry(name, { recursive: true });
-        if (isSpaceDir) report.spacesRemoved++;
-        else report.rootFilesRemoved++;
-      } catch (e) {
-        report.errors.push(`opfs:${name}: ${describe(e)}`);
-      }
-    }
-  } catch (e) {
-    report.errors.push(`opfs:root: ${describe(e)}`);
-  }
-
-  // ── Matrix crypto IndexedDB ─────────────────────────────────────────────
-  // Mirrors the deletion list in components/Layout.tsx — keeping the two in
-  // sync matters because logout() deletes these on the way out, but a crashed
-  // app never reaches logout. Without this, a user who recovers via
-  // #/reset-storage and then logs back in hits a device-id mismatch.
-  try {
-    const dbs = await indexedDB.databases();
-    const targets = dbs
-      .map((d) => d.name)
-      .filter(
-        (n): n is string =>
-          typeof n === 'string' &&
-          (n.includes('matrix') || n.includes('rust-crypto')),
-      );
-    await Promise.all(
-      targets.map(
-        (name) =>
-          new Promise<void>((resolve) => {
-            const req = indexedDB.deleteDatabase(name);
-            req.onsuccess = () => {
-              report.cryptoDbsRemoved++;
-              resolve();
-            };
-            req.onerror = () => {
-              report.errors.push(`idb:${name}: deleteDatabase errored`);
-              resolve();
-            };
-            // Blocked means another tab still has the DB open. Resolve so the
-            // overall reset doesn't hang forever — the user can close other
-            // tabs and re-run the reset URL if it matters.
-            req.onblocked = () => {
-              report.errors.push(`idb:${name}: blocked by another tab`);
-              resolve();
-            };
-          }),
-      ),
-    );
-  } catch (e) {
-    report.errors.push(`idb: ${describe(e)}`);
-  }
-
-  return report;
-}
-
-function describe(e: unknown): string {
-  if (e instanceof Error) return e.message;
-  return String(e);
+  return { spacesRemoved, rootFilesRemoved, cryptoDbsRemoved, errors: [] };
 }
 
 /**

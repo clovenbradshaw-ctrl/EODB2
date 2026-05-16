@@ -1,18 +1,22 @@
 import { useState, useEffect, useLayoutEffect, useRef, useMemo, useCallback, lazy, Suspense, type ComponentType } from 'react';
-import { logout, createMatrixClient, type MatrixSession } from '../matrix/client';
+import { createMatrixClient, type MatrixSession } from '../matrix/client';
 import { useEoStore } from '../store/eo-store';
-import { persistSpaceMeta, listSpaceMeta, clearAllSpaceMetas, saveSpaceMeta, removeSpaceMeta } from '../db/space-meta';
+import { persistSpaceMeta, listSpaceMeta, saveSpaceMeta, removeSpaceMeta } from '../db/space-meta';
 import { clearSpaceLocalData } from '../db/clear-space-data';
+import {
+  type SessionPhase,
+  isTerminalSessionPhase,
+  purgeAccountStorage,
+} from '../lib/session-lifecycle';
 import { Modal } from './Modal';
 import { createFoldWorkerClient, initFoldWorker, type FoldWorkerClient } from '../db/lazy-fold';
-import { SyncManager, eraseOfflineQueueDb } from '../matrix/sync-manager';
+import { SyncManager } from '../matrix/sync-manager';
 import { PeerSync } from '../matrix/peer-sync';
 import { WebRTCPeer } from '../matrix/webrtc-peer';
 import {
   hydrateBlocksIfStale,
   listenForChainUpdates,
   isAutoIngestEnabled,
-  clearAllHydratedHeadMarkers,
   getPersistedHydratedHead,
   setPersistedHydratedHead,
 } from '../sync/block-hydration';
@@ -2281,8 +2285,17 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
     };
   }, [matrixReady, selectedSpace, localMode, cachedSpaceMetas]);
 
+  // Session lifecycle latch (Phase 2). `handleLogout` had no re-entrancy
+  // guard, so a double-click — or an auto-logout racing a manual one — ran
+  // the whole teardown twice. The phase is the single latch.
+  const sessionPhaseRef = useRef<SessionPhase>('active');
+
   async function handleLogout() {
-    // Save snapshots for ALL cached spaces before clearing state
+    // Idempotent: once a purge has begun, a second invocation is a no-op.
+    if (isTerminalSessionPhase(sessionPhaseRef.current)) return;
+    sessionPhaseRef.current = 'purging';
+
+    // Save snapshots for ALL cached spaces before clearing state.
     const cache = spaceCacheRef.current;
     const savePromises: Promise<unknown>[] = [];
     for (const [, cached] of cache) {
@@ -2300,35 +2313,19 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
     cache.clear();
 
     teardown();
-    logout();
 
-    // Clear all OPFS space directories so stale content doesn't persist
-    // across sign-out / account switches.
-    try {
-      const root = await navigator.storage.getDirectory();
-      for await (const [name] of (root as any).entries()) {
-        if (typeof name === 'string' && name.startsWith('space.')) {
-          await root.removeEntry(name, { recursive: true }).catch(() => {});
-        }
-      }
-    } catch { /* best effort */ }
-    // Clear persisted space metadata from localStorage.
-    clearAllSpaceMetas();
-    // Also clear Matrix crypto stores — they use a different prefix and
-    // would otherwise cause device-ID mismatches on the next login.
-    await clearMatrixCryptoStore();
-    // Wipe block-chain hydration cursors so a new account doesn't inherit
-    // a "we already hydrated up to X" marker that would skip blocks on
-    // re-login. (V5/V9 of HELIX-AUDIT-2026-05-11.md.)
-    clearAllHydratedHeadMarkers();
-    // Drop the IDB offline queue so queued writes from the prior session
-    // don't get replayed under the new account's identity. (V5.)
-    await eraseOfflineQueueDb();
+    // One exhaustive purge of everything account-scoped: localStorage keys
+    // (session, device-id, selected-space, persona, space metas, hydration
+    // cursors, per-room auto-ingest toggles), OPFS space dirs, the Matrix
+    // crypto IDB, and the offline-queue IDB. (Single source of truth —
+    // see lib/session-lifecycle.ts.)
+    await purgeAccountStorage();
 
+    sessionPhaseRef.current = 'signed-out';
     onLogout();
   }
 
-  // Auto-REC on session expiry: when Matrix returns 401 / M_UNKNOWN_TOKEN
+  // Auto-logout on session expiry: when Matrix returns 401 / M_UNKNOWN_TOKEN
   // (surfaced via connectionError.phase === 'auth'), the prior session's
   // token is dead. Trust in any persisted state from this session is now
   // unverifiable, so trigger the same handleLogout path the user would
@@ -2337,14 +2334,13 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
   // (V6 of HELIX-AUDIT-2026-05-11.md.)
   const handleLogoutRef = useRef(handleLogout);
   handleLogoutRef.current = handleLogout;
-  const autoLogoutFiredRef = useRef(false);
   useEffect(() => {
-    if (connectionError?.phase !== 'auth') {
-      autoLogoutFiredRef.current = false;
-      return;
+    if (connectionError?.phase !== 'auth') return;
+    if (sessionPhaseRef.current === 'active') {
+      sessionPhaseRef.current = 'expired';
     }
-    if (autoLogoutFiredRef.current) return;
-    autoLogoutFiredRef.current = true;
+    // handleLogout is idempotent via the lifecycle phase, so this is safe
+    // even if the effect re-runs or the user also clicks "Re-login".
     void handleLogoutRef.current();
   }, [connectionError]);
 
