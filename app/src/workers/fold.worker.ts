@@ -80,6 +80,14 @@ function rebuildIndexFromCache(cache: InitCachePayload): LogIndex {
     const op = ops[i];
     const target = targets[i];
 
+    // A cache written by the pre-fix builder can carry trailing `undefined`
+    // holes (its arrays were sized to `seqToOffset.size`, not the actual
+    // scan length). Bail cleanly so the caller falls back to a full
+    // buildIndex instead of crashing on `undefined.split('.')`.
+    if (typeof target !== 'string' || typeof op !== 'string') {
+      throw new Error('init-cache: malformed entry — rebuilding from log');
+    }
+
     let bucket = opBuckets.get(op);
     if (!bucket) {
       bucket = { seqs: [], offsets: [], branches: [] };
@@ -114,28 +122,35 @@ function rebuildIndexFromCache(cache: InitCachePayload): LogIndex {
  */
 function buildInitCachePayload(): InitCachePayload | null {
   if (!log || !index || !position) return null;
-  const n = index.seqToOffset.size;
-  const seqs = new Uint32Array(n);
-  const offsets = new Uint32Array(n);
-  const ops: LoggableOperator[] = new Array(n);
-  const targets: string[] = new Array(n);
 
-  // Walk the log once in seq-order to recover (op, target) per event.
-  let i = 0;
+  // Walk the log once and collect per-event metadata by append. The arrays
+  // are NOT pre-sized to `index.seqToOffset.size` — a stale or cache-derived
+  // `seqToOffset` could be larger than the actual log scan, which left
+  // trailing `undefined` holes that crashed `rebuildIndexFromCache` and
+  // forced a full buildIndex on every load. Appending keeps the four arrays
+  // exactly as long as the scan.
+  const seqs: number[] = [];
+  const offsets: number[] = [];
+  const ops: LoggableOperator[] = [];
+  const targets: string[] = [];
   for (const { event, byteOffset } of scanLog(log, 0)) {
-    if (i >= n) break;
-    seqs[i] = event.seq;
-    offsets[i] = byteOffset;
-    ops[i] = event.op;
-    targets[i] = event.target;
-    i++;
+    if (typeof event.target !== 'string') continue; // skip malformed events
+    seqs.push(event.seq);
+    offsets.push(byteOffset);
+    ops.push(event.op);
+    targets.push(event.target);
   }
 
   return {
     version: 1,
     logByteSize: log.size,
     headSeq: position.seq,
-    entries: { seqs, offsets, ops, targets },
+    entries: {
+      seqs: new Uint32Array(seqs),
+      offsets: new Uint32Array(offsets),
+      ops,
+      targets,
+    },
     computedCache: [...computedCache.entries()],
   };
 }
