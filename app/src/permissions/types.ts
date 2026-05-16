@@ -178,7 +178,7 @@ export interface SchemaManifest {
  */
 export interface PersonaHome {
   /** Which top-level view to land on. */
-  view: 'records' | 'builder' | 'graph' | 'log' | 'messages' | 'people' | 'members' | 'api' | 'import' | 'compose' | 'settings';
+  view: 'records' | 'builder' | 'graph' | 'log' | 'messages' | 'people' | 'members' | 'api' | 'import' | 'settings';
   /** Optional default scope (table full path) when landing. */
   scope?: string;
   /** If view === 'builder', the specific builder page to open. */
@@ -252,7 +252,6 @@ export interface UserTypeDefinition {
 export const TERMINOLOGY_KEYS = [
   'record',        // singular
   'records',       // plural + nav label
-  'compose',       // nav label
   'import',        // nav label
   'log',           // nav label
   'people',        // nav label
@@ -268,7 +267,6 @@ export type TerminologyKey = typeof TERMINOLOGY_KEYS[number];
 export const TERMINOLOGY_DEFAULTS: Record<TerminologyKey, string> = {
   record: 'Record',
   records: 'Records',
-  compose: 'Compose',
   import: 'Import',
   log: 'Log',
   people: 'People',

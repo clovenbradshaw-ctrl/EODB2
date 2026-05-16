@@ -4,8 +4,8 @@
  * currently open scope matches one of them.
  *
  * Each button dispatches a prefilled INS event via the eo-store fold
- * pipeline. No new operators, no new storage path — just a shortcut to
- * the existing compose flow.
+ * pipeline. No new operators, no new storage path — just a record-creation
+ * shortcut.
  */
 
 import { useState } from 'react';
