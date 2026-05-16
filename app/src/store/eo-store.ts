@@ -299,6 +299,7 @@ export const useEoStore = create<EoDbState>((set, get) => ({
     let snapshotHit = false;
     let snapshotHydratedHead: string | null = null;
     let memStore: ReturnType<typeof createMemoryStore>;
+    const _initT0 = performance.now();
     try {
       const snapshot = await loadKvSnapshot(workerClient);
       if (snapshot) {
@@ -313,6 +314,7 @@ export const useEoStore = create<EoDbState>((set, get) => ({
     } catch {
       memStore = createMemoryStore();
     }
+    const _tSnapshot = performance.now();
 
     // ── Fast path: worker says the log hasn't advanced past the snapshot ─────
     // When `workerHeadSeq === snapshotSeq` the log has literally no events the
@@ -338,6 +340,7 @@ export const useEoStore = create<EoDbState>((set, get) => ({
         replayFailed = true;
       }
     }
+    const _tReplay = performance.now();
 
     // From here on, every log: write also persists to OPFS through the
     // coordinator. The returned promise lets MemoryStore track the queue;
@@ -387,6 +390,16 @@ export const useEoStore = create<EoDbState>((set, get) => ({
     }
 
     set({ store: memStore, workerClient, lastSeq, ready: true, recentEvents: hydrated, snapshotHydratedHead });
+
+    // Boot timing — surfaces where the "Initializing store" wait goes so the
+    // store-init slow path can be targeted from real numbers.
+    console.log(
+      `[EO-DB] init timing: kv-snapshot load=${(_tSnapshot - _initT0).toFixed(0)}ms` +
+        ` scan+replay=${(_tReplay - _tSnapshot).toFixed(0)}ms` +
+        ` total=${(performance.now() - _initT0).toFixed(0)}ms` +
+        ` — events=${lastSeq}, replayed=${replayedEvents.length},` +
+        ` workerHeadSeq=${workerHeadSeq ?? 'n/a'}, nothingNew=${nothingNew}`,
+    );
 
     // ── Persist an updated snapshot for the next page refresh ────────────────
     // Skip the resave when nothing changed — the on-disk snapshot is already
