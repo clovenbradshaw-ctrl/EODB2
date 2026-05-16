@@ -70,7 +70,6 @@ const VIEW_TITLES: Record<View, string> = {
   log: 'Event log',
   graph: 'Graph',
   import: 'Import',
-  compose: 'Compose',
   settings: 'Settings',
   builder: 'Builder',
   messages: 'Messages',
@@ -87,7 +86,6 @@ const VIEW_ICONS: Record<View, string> = {
   log: '\u2261',            // ≡
   graph: '\u25C8',          // ◈
   import: '\u2935',         // ⤵
-  compose: '\u002B',        // +
   settings: '\u2699',       // ⚙
   builder: '\u25A3',        // ▣
   messages: '\u2709',       // ✉

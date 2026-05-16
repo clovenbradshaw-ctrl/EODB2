@@ -985,7 +985,7 @@ export function GraphView({ allStates }: { allStates?: EoState[] }) {
               <div style={{ fontSize: 12, color: theme.textMuted, marginTop: 6 }}>
                 {isFiltered
                   ? 'Try a broader query or clear the filter to see all edges.'
-                  : 'Use the Compose tab to create CON events, which link targets together as graph edges.'}
+                  : 'Create CON events to link targets together as graph edges.'}
               </div>
             </div>
           ) : (
