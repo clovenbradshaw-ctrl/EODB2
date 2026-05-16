@@ -347,6 +347,12 @@ export const useEoStore = create<EoDbState>((set, get) => ({
     memStore.enablePersistence((event) => persistence.append(event));
 
     const lastSeq = await memStore.getCurrentSeq();
+    // Seed the coordinator's durability cursor: every event the store holds
+    // at init came from the OPFS log (the kv-snapshot was built from log
+    // events; the delta replay read straight from the log), so it is all
+    // already durable. Without this seed, the post-init snapshot would warn
+    // that the entire restored kv map is "snapshot-only".
+    persistence.markDurable(lastSeq);
 
     // Hydrate recentEvents — cap at the last 2 000 events to avoid loading
     // a large array into Zustand state on init.  LogView loads older pages on demand.
