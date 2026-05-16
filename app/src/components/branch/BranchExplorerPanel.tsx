@@ -383,12 +383,8 @@ function BranchExplorerIntro({ theme, hasSynEvents }: IntroProps) {
             }}
           >
             <li>
-              Open the <strong style={{ color: theme.text }}>Compose</strong>{' '}
-              view from the actions menu.
-            </li>
-            <li>
-              Choose op <strong style={{ color: theme.text }}>SYN</strong>,
-              pick two or more source entities, and name the survivor.
+              Create a <strong style={{ color: theme.text }}>SYN</strong> event,
+              picking two or more source entities and naming the survivor.
             </li>
             <li>
               Dispatch. The SYN event appears in this sidebar, ready to branch.

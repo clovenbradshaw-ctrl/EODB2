@@ -998,7 +998,7 @@ export function LogView({ targetFilter }: { targetFilter?: string | null }) {
                   </svg>
                   <div style={{ fontSize: 12, color: t.textMuted, fontWeight: 500 }}>No events yet</div>
                   <div style={{ fontSize: 11, color: t.textMuted, opacity: 0.7, maxWidth: 260, lineHeight: 1.5 }}>
-                    Use <span style={{ color: t.accent }}>Compose</span> to create your first event, or <span style={{ color: t.accent }}>Import</span> to load data.
+                    Use <span style={{ color: t.accent }}>Import</span> to load data.
                   </div>
                 </>
               ) : (

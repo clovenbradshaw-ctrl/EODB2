@@ -42,7 +42,6 @@ const DEFAULT_COLORS = [
 
 /** Views that admins can configure per-role. Records is always visible. Multiuser is a testing tool. */
 const CONFIGURABLE_VIEWS: { id: string; label: string }[] = [
-  { id: 'compose', label: 'Compose' },
   { id: 'import', label: 'Import' },
   { id: 'api', label: 'API Connections' },
   { id: 'people', label: 'People' },
@@ -64,7 +63,6 @@ const HOME_VIEW_OPTIONS: { id: PersonaHome['view']; label: string }[] = [
   { id: 'members', label: 'Members & Roles' },
   { id: 'api', label: 'API Connections' },
   { id: 'import', label: 'Import' },
-  { id: 'compose', label: 'Compose' },
   { id: 'settings', label: 'Settings' },
 ];
 

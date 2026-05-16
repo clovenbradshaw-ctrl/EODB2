@@ -93,7 +93,6 @@ function lazyWithRetry<T extends ComponentType<any>>(
   });
 }
 const LogView = lazyWithRetry(() => import('./LogView').then(m => ({ default: m.LogView })));
-const ComposeView = lazyWithRetry(() => import('./ComposeView').then(m => ({ default: m.ComposeView })));
 const GraphView = lazyWithRetry(() => import('./GraphView').then(m => ({ default: m.GraphView })));
 const SchemaView = lazyWithRetry(() => import('./SchemaView').then(m => ({ default: m.SchemaView })));
 const KanbanView = lazyWithRetry(() => import('./KanbanView').then(m => ({ default: m.KanbanView })));
@@ -2422,7 +2421,6 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
     records: '\u25A6',  // grid icon
     log: '\u2630',      // list icon
     graph: '\u2B21',    // hexagon
-    compose: '\u270E',  // pencil
     import: '\u2B07',   // download arrow
     api: '\uD83D\uDD17', // link icon
     builder: '\u2B1A',  // blocks
@@ -2571,8 +2569,6 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
     const open = (route: Partial<AppRoute>) =>
       openRouteAsTab(route, { reuseByView: true });
     return [
-      { id: 'go-compose', group: 'Go to', label: 'New record', icon: 'plus',
-        run: () => open({ view: 'compose', space: selectedSpace }) },
       { id: 'go-import', group: 'Go to', label: 'Import', icon: 'download',
         run: () => open({ view: 'import', space: selectedSpace }) },
       { id: 'go-people', group: 'Go to', label: 'People', icon: 'users',
@@ -3109,23 +3105,22 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
               };
             }
             // Configurable views (excludes records/multiuser which are special-cased)
-            const CONFIGURABLE_VIEWS: View[] = ['compose', 'import', 'people', 'members', 'log', 'builder', 'settings'];
+            const CONFIGURABLE_VIEWS: View[] = ['import', 'people', 'members', 'log', 'builder', 'settings'];
             const hiddenCount = activeTypeDef?.visible_views
               ? CONFIGURABLE_VIEWS.filter(v => !activeTypeDef.visible_views!.includes(v)).length
               : 0;
             return (
           <nav style={s.sidebarNav}>
             <div style={s.navGroupLabel}>Actions</div>
-            {(['compose', 'import'] as View[]).map((view) => isNavViewVisible(view) && (
+            {isNavViewVisible('import') && (
               <button
-                key={view}
-                onClick={() => openRouteAsTab({ view, space: selectedSpace }, { reuseByView: true })}
-                style={navItemStyle(view)}
+                onClick={() => openRouteAsTab({ view: 'import', space: selectedSpace }, { reuseByView: true })}
+                style={navItemStyle('import')}
               >
-                <span style={s.navIcon}>{NAV_ICONS[view]}</span>
-                {view === 'compose' ? `+ ${term('compose')}` : term(view as TerminologyKey)}
+                <span style={s.navIcon}>{NAV_ICONS.import}</span>
+                {term('import')}
               </button>
-            ))}
+            )}
             <div style={s.navGroupLabel}>Collaborate</div>
             {isNavViewVisible('people') && (
               <button
@@ -3381,8 +3376,6 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
               <GraphView allStates={allStates} />
             ) : activeView === 'import' ? (
               <ImportView onImportComplete={(scope) => navigate({ view: 'records', scope, record: null })} />
-            ) : activeView === 'compose' ? (
-              <ComposeView permissions={currentPermissions} />
             ) : activeView === 'builder' ? (
               <BuilderView />
             ) : activeView === 'people' ? (
