@@ -142,4 +142,25 @@ describe('PersistenceCoordinator', () => {
     const coord = createPersistenceCoordinator(client);
     await expect(coord.awaitDurable()).resolves.toBeUndefined();
   });
+
+  it('markDurable seeds the cursor and never lowers it', () => {
+    const coord = createPersistenceCoordinator(client);
+    expect(coord.durableSeq).toBe(0);
+    coord.markDurable(500);
+    expect(coord.durableSeq).toBe(500);
+    coord.markDurable(200);
+    expect(coord.durableSeq).toBe(500);
+  });
+
+  it('a snapshot at the seeded durable seq does not warn (boot path)', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const coord = createPersistenceCoordinator(client);
+    // Simulate boot: the OPFS log already holds 100k events from prior
+    // sessions, so the coordinator is seeded before the post-init snapshot.
+    coord.markDurable(100_001);
+    const result = await coord.snapshot({ entries: [], recentTail: [], seq: 100_001 });
+    expect(result.durableSeq).toBe(100_001);
+    expect(warn).not.toHaveBeenCalled();
+    warn.mockRestore();
+  });
 });

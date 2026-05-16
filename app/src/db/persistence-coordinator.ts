@@ -67,6 +67,15 @@ export interface PersistenceCoordinator {
    */
   snapshot(input: SnapshotInput): Promise<{ seq: number; durableSeq: number }>;
   /**
+   * Record that the OPFS log is already durable through `seq`. Used on boot
+   * to seed the cursor with the log head the worker restored from disk —
+   * the coordinator only observes appends made during the current session,
+   * so without this seed a post-init snapshot (whose kv map was rebuilt
+   * from that already-durable log) would false-positive as "snapshot-only".
+   * Monotonic: never lowers `durableSeq`.
+   */
+  markDurable(seq: number): void;
+  /**
    * Highest seq durably acked by the OPFS log. The single durability cursor
    * — it replaces the independent kv-snapshot / init-cache / fold-position
    * seq cursors as the authority for "how far is durable".
@@ -167,10 +176,15 @@ export function createPersistenceCoordinator(
     return { seq: input.seq, durableSeq };
   }
 
+  function markDurable(seq: number): void {
+    if (seq > durableSeq) durableSeq = seq;
+  }
+
   return {
     append,
     awaitDurable,
     snapshot,
+    markDurable,
     get durableSeq() {
       return durableSeq;
     },
