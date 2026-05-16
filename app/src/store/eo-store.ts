@@ -14,13 +14,14 @@ import { readLogSince } from '../db/log';
 import {
   createFoldWorkerClient,
   initFoldWorker,
-  appendRaw,
   scanLog,
-  saveKvSnapshot,
   loadKvSnapshot,
-  saveInitCache,
   type FoldWorkerClient,
 } from '../db/lazy-fold';
+import {
+  createPersistenceCoordinator,
+  type PersistenceCoordinator,
+} from '../db/persistence-coordinator';
 import type { EoEvent, EoEventInput, EoState, HorizonResponse } from '../db/types';
 import type { SyncManager } from '../matrix/sync-manager';
 import type { ResolvedPermissions } from '../permissions/types';
@@ -147,6 +148,13 @@ interface EoDbState {
   store: EoStore | null;
   /** The fold worker client for OPFS persistence */
   workerClient: FoldWorkerClient | null;
+  /**
+   * The durability barrier — the single owner of OPFS persistence for the
+   * current worker. Created in `init` per fold-worker client; null before
+   * the first space is initialized. All log appends and snapshot writes go
+   * through it so there is exactly one durability cursor (`durableSeq`).
+   */
+  persistence: PersistenceCoordinator | null;
   /** The sync manager for sending events to Matrix */
   syncManager: SyncManager | null;
   /** Recent events processed through the fold */
@@ -238,6 +246,7 @@ interface EoDbState {
 export const useEoStore = create<EoDbState>((set, get) => ({
   store: null,
   workerClient: null,
+  persistence: null,
   syncManager: null,
   recentEvents: [],
   lastSeq: 0,
@@ -273,11 +282,14 @@ export const useEoStore = create<EoDbState>((set, get) => ({
       return;
     }
 
-    // Different worker (space switch) — build a fresh memory store.
+    // Different worker (space switch) — build a fresh memory store and a
+    // fresh durability coordinator. One coordinator per worker client: it
+    // owns the single durability cursor for this space's OPFS log.
+    const persistence = createPersistenceCoordinator(workerClient);
     if (wasReady) {
-      set({ store: null, workerClient, recentEvents: [], lastSeq: 0, ready: false });
+      set({ store: null, workerClient, persistence, recentEvents: [], lastSeq: 0, ready: false });
     } else {
-      set({ store: null, workerClient, ready: false, recentEvents: [], lastSeq: 0 });
+      set({ store: null, workerClient, persistence, ready: false, recentEvents: [], lastSeq: 0 });
     }
 
     // ── Try restoring from OPFS kv snapshot for fast page-load ───────────────
@@ -327,15 +339,12 @@ export const useEoStore = create<EoDbState>((set, get) => ({
       }
     }
 
-    // From here on, every log: write also persists to OPFS. Returning the
-    // appendRaw promise lets MemoryStore track the queue so flushToOpfs
-    // can drain pending writes before snapshotting (otherwise a 30k-event
-    // burst can leave the kv-snapshot ahead of the OPFS log).
-    memStore.enablePersistence((event) => {
-      return appendRaw(workerClient, event).catch((e) => {
-        console.warn('[EO-DB] appendRaw failed:', e);
-      });
-    });
+    // From here on, every log: write also persists to OPFS through the
+    // coordinator. The returned promise lets MemoryStore track the queue;
+    // the coordinator tracks the same writes against `durableSeq` so a
+    // snapshot can drain them before capturing the kv map (otherwise a
+    // 30k-event burst can leave the kv-snapshot ahead of the OPFS log).
+    memStore.enablePersistence((event) => persistence.append(event));
 
     const lastSeq = await memStore.getCurrentSeq();
 
@@ -383,13 +392,15 @@ export const useEoStore = create<EoDbState>((set, get) => ({
       // Carry forward the snapshot's hydration cursor (V9). The chain
       // hasn't been re-walked here — the OPFS log delta replay only adds
       // raw events — so the prior snapshot's chain coverage is still
-      // accurate.
-      saveKvSnapshot(workerClient, memStore.getKvEntries(), hydrated, lastSeq, snapshotHydratedHead).catch((e) =>
-        console.warn('[EO-DB] kv snapshot save failed:', e),
-      );
-      saveInitCache(workerClient).catch((e) =>
-        console.warn('[EO-DB] init-cache save failed:', e),
-      );
+      // accurate. The coordinator drains pending appends (none at init,
+      // since replay ran before enablePersistence) and refreshes the
+      // init-cache alongside.
+      persistence.snapshot({
+        entries: memStore.getKvEntries(),
+        recentTail: hydrated,
+        seq: lastSeq,
+        hydratedHead: snapshotHydratedHead,
+      }).catch((e) => console.warn('[EO-DB] kv snapshot save failed:', e));
     }
   },
 
@@ -653,23 +664,26 @@ export const useEoStore = create<EoDbState>((set, get) => ({
   },
 
   async manualSnapshot() {
-    const { store, workerClient, recentEvents, snapshotHydratedHead } = get();
+    const { store, persistence, recentEvents, snapshotHydratedHead } = get();
     if (!store) throw new Error('Store not initialized');
 
-    // Persist the current in-memory KV state to OPFS.
+    // Persist the current in-memory KV state to OPFS. `snapshot()` drains
+    // any in-flight appends first — without that barrier a manual snapshot
+    // taken right after a write burst captures a kv-snapshot whose `seq`
+    // claims events still in flight to the OPFS log.
     const lastSeq = await store.getCurrentSeq();
     const memStore = store as MemoryStore;
-    if (workerClient && typeof memStore.getKvEntries === 'function') {
+    if (persistence && typeof memStore.getKvEntries === 'function') {
       try {
-        await saveKvSnapshot(workerClient, memStore.getKvEntries(), recentEvents, lastSeq, snapshotHydratedHead);
+        await persistence.snapshot({
+          entries: memStore.getKvEntries(),
+          recentTail: recentEvents,
+          seq: lastSeq,
+          hydratedHead: snapshotHydratedHead,
+        });
       } catch (e) {
         console.warn('[EO-DB] manualSnapshot: kv snapshot save failed:', e);
       }
-      // Bake the worker's init-cache alongside so the next page refresh can
-      // skip buildIndex() when the log hasn't moved since this snapshot.
-      saveInitCache(workerClient).catch((e) =>
-        console.warn('[EO-DB] manualSnapshot: init-cache save failed:', e),
-      );
     }
 
     return { seq: lastSeq };
@@ -683,31 +697,31 @@ export const useEoStore = create<EoDbState>((set, get) => ({
     // correct, but the snapshot's claim of coverage becomes a lie.
     // (V10 of HELIX-AUDIT-2026-05-11.md.)
     await awaitFoldQuiescent();
-    const { store, workerClient, recentEvents, snapshotHydratedHead } = get();
+    const { store, persistence, recentEvents, snapshotHydratedHead } = get();
     if (!store) throw new Error('Store not initialized');
     const memStore = store as MemoryStore;
-    // Drain any in-flight appendRaw writes BEFORE capturing the kv-snapshot.
-    // Without this barrier, a hydration that just ran 30k processEvent calls
-    // can leave the worker's OPFS log behind the kv map; a hard reload then
-    // restores a snapshot whose log: entries don't actually exist on disk.
-    if (typeof memStore.awaitPersistence === 'function') {
-      await memStore.awaitPersistence();
-    }
     const lastSeq = await store.getCurrentSeq();
-    if (workerClient && typeof memStore.getKvEntries === 'function') {
+    if (persistence && typeof memStore.getKvEntries === 'function') {
       // If the caller didn't tell us "this snapshot now covers chain head X",
       // carry forward whatever cursor the last snapshot already claimed.
       // Persisting the cursor inside the snapshot makes it atomic with the
       // kv map, so a missing localStorage entry no longer means
       // "re-walk the entire chain". (V9.)
+      //
+      // `snapshot()` drains every in-flight append BEFORE capturing the kv
+      // map. Without that barrier a hydration that just ran 30k processEvent
+      // calls can leave the OPFS log behind the kv map, and a hard reload
+      // restores a snapshot whose log: entries aren't actually on disk.
       const head = hydratedHead === undefined ? snapshotHydratedHead : hydratedHead;
-      await saveKvSnapshot(workerClient, memStore.getKvEntries(), recentEvents, lastSeq, head);
+      await persistence.snapshot({
+        entries: memStore.getKvEntries(),
+        recentTail: recentEvents,
+        seq: lastSeq,
+        hydratedHead: head,
+      });
       if (head !== snapshotHydratedHead) {
         set({ snapshotHydratedHead: head });
       }
-      saveInitCache(workerClient).catch((e) =>
-        console.warn('[EO-DB] flushToOpfs: init-cache save failed:', e),
-      );
     }
   },
 
@@ -721,6 +735,7 @@ export const useEoStore = create<EoDbState>((set, get) => ({
     set({
       store: null,
       workerClient: null,
+      persistence: null,
       syncManager: null,
       ready: false,
       recentEvents: [],
