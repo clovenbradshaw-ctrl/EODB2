@@ -316,15 +316,39 @@ export const useEoStore = create<EoDbState>((set, get) => ({
     }
     const _tSnapshot = performance.now();
 
+    // ── Auditability: keep the append-only log as the source of truth ───────
+    // A kv-snapshot whose seq is ahead of the worker's log head holds events
+    // the OPFS log never durably recorded (a prior session's appendRaw failed
+    // before the snapshot was written). The snapshot's own `log:` entries
+    // still carry those events, so re-append them — the log becomes the
+    // complete, audited record rather than the app silently trusting the
+    // snapshot or dropping the events. After a successful heal the log head
+    // equals the snapshot seq, so the fast path below treats it as caught up.
+    let healedHeadSeq = workerHeadSeq;
+    if (snapshotHit && workerHeadSeq !== undefined && snapshotSeq > workerHeadSeq) {
+      try {
+        const missing = await readLogSince(memStore, workerHeadSeq);
+        for (const ev of missing) await persistence.append(ev);
+        await persistence.awaitDurable();
+        healedHeadSeq = snapshotSeq;
+        console.warn(
+          `[EO-DB] healed OPFS log: re-appended ${missing.length} event(s) the ` +
+            `kv-snapshot held ahead of log head ${workerHeadSeq}`,
+        );
+      } catch (e) {
+        console.warn('[EO-DB] OPFS log heal failed:', e);
+      }
+    }
+
     // ── Fast path: worker says the log hasn't advanced past the snapshot ─────
-    // When `workerHeadSeq === snapshotSeq` the log has literally no events the
-    // snapshot doesn't already include, so scanLog would return [] anyway —
-    // skip it to avoid the extra worker roundtrip. This is the "refresh when
-    // nothing has changed" path: no replay, no readLogSince, no snapshot resave.
+    // When the (healed) log head equals `snapshotSeq` the log has literally no
+    // events the snapshot doesn't already include, so scanLog would return []
+    // anyway — skip it to avoid the extra worker roundtrip. This is the
+    // "refresh when nothing has changed" path: no replay, no snapshot resave.
     const nothingNew =
       snapshotHit &&
-      workerHeadSeq !== undefined &&
-      workerHeadSeq === snapshotSeq;
+      healedHeadSeq !== undefined &&
+      healedHeadSeq === snapshotSeq;
 
     let replayedEvents: EoEvent[] = [];
     let replayFailed = false;
