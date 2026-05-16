@@ -9,6 +9,7 @@ import {
   purgeAccountStorage,
 } from '../lib/session-lifecycle';
 import { Modal } from './Modal';
+import { CommandPalette, type Command } from './CommandPalette';
 import { createFoldWorkerClient, initFoldWorker, type FoldWorkerClient } from '../db/lazy-fold';
 import { SyncManager } from '../matrix/sync-manager';
 import { PeerSync } from '../matrix/peer-sync';
@@ -2563,6 +2564,30 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
 
   const mono = "'JetBrains Mono', monospace";
 
+  // ⌘K command palette — view-navigation commands. `openRouteAsTab` is a
+  // stable useCallback, so this rebuilds only on a space switch.
+  const paletteCommands = useMemo<Command[]>(() => {
+    if (!selectedSpace) return [];
+    const open = (route: Partial<AppRoute>) =>
+      openRouteAsTab(route, { reuseByView: true });
+    return [
+      { id: 'go-compose', group: 'Go to', label: 'New record', icon: 'plus',
+        run: () => open({ view: 'compose', space: selectedSpace }) },
+      { id: 'go-import', group: 'Go to', label: 'Import', icon: 'download',
+        run: () => open({ view: 'import', space: selectedSpace }) },
+      { id: 'go-people', group: 'Go to', label: 'People', icon: 'users',
+        run: () => open({ view: 'people', space: selectedSpace }) },
+      { id: 'go-members', group: 'Go to', label: 'Members & Roles', icon: 'shield',
+        run: () => open({ view: 'members', space: selectedSpace }) },
+      { id: 'go-log', group: 'Go to', label: 'Event log', icon: 'history',
+        run: () => open({ view: 'log', space: selectedSpace }) },
+      { id: 'go-builder', group: 'Go to', label: 'Builder', icon: 'layout',
+        run: () => open({ view: 'builder', space: selectedSpace, builderViewId: null, customPageId: null }) },
+      { id: 'go-settings', group: 'Go to', label: 'Settings', icon: 'settings',
+        run: () => open({ view: 'settings', space: selectedSpace }) },
+    ];
+  }, [selectedSpace, openRouteAsTab]);
+
   return (
     <div style={{
       ...s.container,
@@ -2571,6 +2596,8 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
     }}>
       {/* Dev-gated PressureMonitor badge (?pressure=1 or localStorage flag). */}
       <PressureBadge />
+      {/* ⌘K command palette — self-contained overlay; owns its own shortcut. */}
+      <CommandPalette commands={paletteCommands} />
       {/* Persona strip — always visible at the very top when a persona is
           active so the user has a persistent at-a-glance indicator of the
           persona they're currently in (works on mobile and desktop). */}
