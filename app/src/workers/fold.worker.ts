@@ -17,6 +17,8 @@ import type { LogIndex, IndexEntry, TrieNode } from '../db/log-index';
 import { saveInitCache, loadInitCache } from '../db/init-cache';
 import type { InitCachePayload } from '../db/init-cache';
 import { evaluateFormulaExpression } from '../db/formula-eval';
+import { compareFieldWrites } from '../db/fold-core';
+import type { FieldWrite } from '../db/fold-core';
 import {
   createFoldPosition,
   applyEvent,
@@ -282,11 +284,27 @@ function getFieldFromLog(target: string, field: string): unknown {
   const prefix = `${target}.${field}`;
   const seqs = getIntersection(index, 'DEF', prefix);
   if (!seqs.length) return undefined;
-  const lastSeq = seqs[seqs.length - 1];
-  const offset = index.seqToOffset.get(lastSeq);
-  if (offset === undefined) return undefined;
-  const event = readEventAt(log, offset);
-  return event.operand;
+  // EO resolution: the latest real-world timestamp wins, not the last-folded
+  // event — so a formula reads the same value the projection (handleDEF)
+  // displays after a partition heal. compareFieldWrites is the shared,
+  // device-independent tiebreak (ts -> client_event_id -> agent).
+  let winner: EoEvent | undefined;
+  let winnerWrite: FieldWrite | undefined;
+  for (const seq of seqs) {
+    const offset = index.seqToOffset.get(seq);
+    if (offset === undefined) continue;
+    const event = readEventAt(log, offset);
+    const write: FieldWrite = {
+      ts: event.ts,
+      agent: event.agent,
+      cid: event.client_event_id ?? '',
+    };
+    if (!winnerWrite || compareFieldWrites(write, winnerWrite) > 0) {
+      winner = event;
+      winnerWrite = write;
+    }
+  }
+  return winner?.operand;
 }
 
 function evaluateFormula(reg: EvaRegistrationLive): void {

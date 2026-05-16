@@ -17,8 +17,9 @@ import {
   mergeOperand,
   isFormulaOperand,
   deepEqual,
+  compareFieldWrites,
 } from './fold-core';
-import type { HelixStateTracker, PromotionCallbacks } from './fold-core';
+import type { HelixStateTracker, PromotionCallbacks, FieldWrite } from './fold-core';
 import { StoreAddressingHorizon, StoreDeclaredHorizon, StoreNulHorizon } from './addressing-horizon';
 import type { AddressingHorizon, DeclaredHorizon, NulHorizon } from './addressing-horizon';
 import { gpuInFlight } from './gpu-in-flight';
@@ -1588,35 +1589,8 @@ async function handleSIG(store: EoStore, event: EoEvent): Promise<void> {
 // checkAndPromote guarantees INS has fired before handleDEF runs.
 // Includes Creator ownership check: agents with PL 10-24 can only DEF
 // records they created (identified by _created_by field).
-
-/**
- * Per-field write provenance, recorded on `state.value._writes`. Only
- * globally-identical event fields are stored — never the local `seq`, which
- * a partition heal assigns differently on each device — so the projection
- * is identical on every peer.
- */
-interface FieldWrite {
-  ts: string;
-  agent: string;
-  cid: string;
-}
-
-/**
- * Order two field writes. Returns > 0 when `a` wins, < 0 when `b` wins.
- *
- * The EO default: the latest real-world timestamp wins. Ties break by
- * `client_event_id` (a content hash) then `agent` — both identical on every
- * device — so the winner is the same regardless of the order the fold
- * happened to process concurrent edits in. `seq` is deliberately NOT used:
- * it is assigned at local fold time and would diverge across peers.
- */
-function compareFieldWrites(a: FieldWrite, b: FieldWrite): number {
-  const ta = Date.parse(a.ts) || 0;
-  const tb = Date.parse(b.ts) || 0;
-  if (ta !== tb) return ta - tb;
-  if (a.cid !== b.cid) return a.cid < b.cid ? -1 : 1;
-  return a.agent < b.agent ? -1 : a.agent > b.agent ? 1 : 0;
-}
+// FieldWrite + compareFieldWrites (the latest-timestamp resolution used here
+// and by the fold worker's getFieldFromLog) live in fold-core.ts.
 
 async function handleDEF(store: EoStore, event: EoEvent): Promise<void> {
   const target = await resolveAlias(store, event.target);

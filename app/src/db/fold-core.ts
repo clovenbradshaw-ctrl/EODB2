@@ -593,6 +593,35 @@ export function mergeOperand(existing: any, incoming: any): any {
   return incoming;
 }
 
+/**
+ * Per-field write provenance, recorded on `state.value._writes`. Only
+ * globally-identical event fields are stored — never the local `seq`, which
+ * a partition heal assigns differently on each device — so the projection
+ * is identical on every peer.
+ */
+export interface FieldWrite {
+  ts: string;
+  agent: string;
+  cid: string;
+}
+
+/**
+ * Order two field writes. Returns > 0 when `a` wins, < 0 when `b` wins.
+ *
+ * The EO default: the latest real-world timestamp wins. Ties break by
+ * `client_event_id` (a content hash) then `agent` — both identical on every
+ * device — so the winner is the same regardless of the order the fold
+ * happened to process concurrent edits in. `seq` is deliberately NOT used:
+ * it is assigned at local fold time and would diverge across peers.
+ */
+export function compareFieldWrites(a: FieldWrite, b: FieldWrite): number {
+  const ta = Date.parse(a.ts) || 0;
+  const tb = Date.parse(b.ts) || 0;
+  if (ta !== tb) return ta - tb;
+  if (a.cid !== b.cid) return a.cid < b.cid ? -1 : 1;
+  return a.agent < b.agent ? -1 : a.agent > b.agent ? 1 : 0;
+}
+
 /** Formula-shaped operand (has a `formula` key). */
 export function isFormulaOperand(operand: any): boolean {
   return operand && typeof operand === 'object' && 'formula' in operand;
