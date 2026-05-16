@@ -16,6 +16,7 @@ import { buildIndex, updateIndex, getIntersection, trieQuery, trieInsert } from 
 import type { LogIndex, IndexEntry, TrieNode } from '../db/log-index';
 import { saveInitCache, loadInitCache } from '../db/init-cache';
 import type { InitCachePayload } from '../db/init-cache';
+import { evaluateFormulaExpression } from '../db/formula-eval';
 import {
   createFoldPosition,
   applyEvent,
@@ -228,25 +229,19 @@ function isSafeFormulaExpression(expr: string, paramAllowlist: Set<string>): boo
 
 /**
  * Evaluate a formula expression with given inputs. Formulas reach this worker
- * via Matrix-synced events, so the expression is treated as untrusted: it's
- * restricted to arithmetic, comparisons, and a small Math.* allowlist before
- * being handed to Function().
+ * via Matrix-synced events, so the expression is untrusted. It is checked by
+ * `isSafeFormulaExpression` and then run through `evaluateFormulaExpression`,
+ * a tokenizer + arithmetic interpreter — NOT `new Function`. That keeps the
+ * page's CSP free of `'unsafe-eval'` and means formula fields execute no
+ * code at all.
  */
 function executeFormulaFunction(formula: unknown, inputs: Record<string, unknown>): unknown {
   if (!formula || typeof formula !== 'object') return null;
   const f = formula as { expr?: string };
   if (!f.expr) return null;
-  const paramNames = Object.keys(inputs);
-  const paramAllowlist = new Set(paramNames);
+  const paramAllowlist = new Set(Object.keys(inputs));
   if (!isSafeFormulaExpression(f.expr, paramAllowlist)) return null;
-  try {
-    const paramValues = Object.values(inputs);
-    // eslint-disable-next-line @typescript-eslint/no-implied-eval
-    const fn = new Function(...paramNames, `"use strict"; return (${f.expr})`);
-    return fn(...paramValues) as unknown;
-  } catch {
-    return null;
-  }
+  return evaluateFormulaExpression(f.expr, inputs);
 }
 
 // ─── EVA registration ─────────────────────────────────────────────────────────
