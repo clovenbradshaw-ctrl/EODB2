@@ -95,7 +95,7 @@ const ACCOUNT_LS_PREFIXES = [
  */
 export const PRESERVED_LS_KEYS = ['eo-theme', 'eo:detailsPanelCollapsed'] as const;
 
-/** Offline-queue IndexedDB name (mirror of sync-manager's IDB_QUEUE_NAME). */
+/** Offline-queue IndexedDB name (mirror of the DB_NAME in matrix/offline-queue.ts). */
 const OFFLINE_QUEUE_DB = 'eo-offline-queue';
 
 // ─── Primitives ──────────────────────────────────────────────────────────────

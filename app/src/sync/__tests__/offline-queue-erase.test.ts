@@ -1,5 +1,5 @@
 /**
- * eraseOfflineQueueDb — V5 of HELIX-AUDIT-2026-05-11.md.
+ * eraseOfflineQueue — V5 of HELIX-AUDIT-2026-05-11.md.
  *
  * On logout the offline-queue IDB has to be wiped so queued writes
  * from the prior session don't get replayed under a new account's
@@ -10,7 +10,7 @@
 import 'fake-indexeddb/auto';
 import { describe, it, expect, beforeEach } from 'vitest';
 import { openDB } from 'idb';
-import { eraseOfflineQueueDb } from '../../matrix/sync-manager';
+import { eraseOfflineQueue } from '../../matrix/offline-queue';
 
 const DB_NAME = 'eo-offline-queue';
 const STORE = 'queue';
@@ -42,7 +42,7 @@ async function dbExists(name: string): Promise<boolean> {
   return dbs.some((d: { name?: string }) => d.name === name);
 }
 
-describe('eraseOfflineQueueDb (V5)', () => {
+describe('eraseOfflineQueue (V5)', () => {
   beforeEach(async () => {
     // Make sure each test starts with no prior state.
     await new Promise<void>((resolve) => {
@@ -57,20 +57,20 @@ describe('eraseOfflineQueueDb (V5)', () => {
     await seedQueue('!room:t', [{ event: { client_event_id: 'ev:1' }, attempts: 0 }]);
     expect(await readQueue('!room:t')).not.toBeNull();
 
-    await eraseOfflineQueueDb();
+    await eraseOfflineQueue();
 
     expect(await readQueue('!room:t')).toBeNull();
   });
 
   it('is a no-op when the database does not exist', async () => {
     // Should not throw even though the DB was never created.
-    await expect(eraseOfflineQueueDb()).resolves.toBeUndefined();
+    await expect(eraseOfflineQueue()).resolves.toBeUndefined();
     expect(await dbExists(DB_NAME)).toBe(false);
   });
 
   it('subsequent opens see a fresh empty DB', async () => {
     await seedQueue('!a:t', 'old-value');
-    await eraseOfflineQueueDb();
+    await eraseOfflineQueue();
     await seedQueue('!a:t', 'new-value');
     expect(await readQueue('!a:t')).toBe('new-value');
     // The prior session's other-room entry is gone.
