@@ -1,5 +1,6 @@
 import { StrictMode } from 'react';
 import { createRoot } from 'react-dom/client';
+import './styles/design-system.css';
 import { App } from './App';
 import { tryRecoverFromChunkError } from './lib/chunk-reload';
 import { pressureMonitor } from './perf/pressure-monitor';

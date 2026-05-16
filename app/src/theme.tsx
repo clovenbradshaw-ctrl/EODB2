@@ -92,50 +92,54 @@ export interface Theme {
   barFill: string;
 }
 
+// Re-skin: the light theme is mapped onto the design-system tokens in
+// src/styles/design-system.css (--bg / --surface / --ink / --accent …),
+// so every component that reads `theme.*` or a `makeStyles` value adopts
+// the warm-paper + indigo palette without any structural change.
 export const lightTheme: Theme = {
   mode: 'light',
 
-  bg: '#faf9f7',
-  bgCard: '#fff',
-  bgHover: '#f4f3f0',
-  bgMuted: '#f4f3f0',
-  bgActive: '#eef5fd',
+  bg: '#fbfaf6',
+  bgCard: '#ffffff',
+  bgHover: '#f5f3ec',
+  bgMuted: '#f5f3ec',
+  bgActive: '#ecedfb',
 
-  text: '#2c2a26',
-  textHeading: '#1a1816',
-  textSecondary: '#635e56',
-  textMuted: '#857f77',
+  text: '#3a3833',
+  textHeading: '#1c1b18',
+  textSecondary: '#6b6960',
+  textMuted: '#93908a',
 
-  border: '#e5e2dd',
-  borderLight: '#f0eeeb',
-  borderDivider: '#d4d0ca',
+  border: '#e8e4d8',
+  borderLight: '#efece3',
+  borderDivider: '#d6d1c2',
 
-  accent: '#1a6dd4',
-  accentBg: '#eef5fd',
-  accentBorder: '#c5d9f0',
+  accent: '#4f55c9',
+  accentBg: '#ecedfb',
+  accentBorder: '#d6d8f4',
 
-  danger: '#d9487a',
-  dangerBg: '#fdf2f5',
-  dangerBorder: '#f0b8c8',
-  dangerText: '#dc3545',
+  danger: '#b13a48',
+  dangerBg: '#f8dfe2',
+  dangerBorder: '#e9c2c8',
+  dangerText: '#b13a48',
 
-  success: '#16a34a',
-  successBg: '#f0faf4',
-  successBorder: '#b8e4ca',
-  successText: '#16643a',
+  success: '#2f8a5d',
+  successBg: '#e3f1e8',
+  successBorder: '#bfe0cd',
+  successText: '#2f7d54',
 
-  warning: '#c2700a',
-  warningBg: '#fef6ed',
-  warningBorder: '#f0d9b8',
-  warningText: '#8a6d20',
+  warning: '#b07415',
+  warningBg: '#f7ecd1',
+  warningBorder: '#e9d6ab',
+  warningText: '#8a5b0d',
 
-  purple: '#7c5cbf',
-  purpleBg: '#f3f0fa',
+  purple: '#6e4cc4',
+  purpleBg: '#ece6f8',
   purpleBorder: '#d9d0ee',
 
-  teal: '#0e8a6e',
-  tealBg: '#eef8f5',
-  tealBorder: '#bce5d9',
+  teal: '#2a7d8c',
+  tealBg: '#dcecef',
+  tealBorder: '#bedde2',
 
   gold: '#8b6834',
   goldBg: '#faf5ed',
@@ -148,24 +152,24 @@ export const lightTheme: Theme = {
   loginText: '#fff',
   loginTextDim: '#888',
 
-  shadow: 'rgba(0,0,0,0.06)',
-  shadowOverlay: 'rgba(0,0,0,0.2)',
-  shadowPanel: '-4px 0 32px rgba(0,0,0,0.06)',
+  shadow: 'rgba(28,27,24,0.06)',
+  shadowOverlay: 'rgba(28,27,24,0.32)',
+  shadowPanel: '-4px 0 32px rgba(28,27,24,0.08)',
 
-  statusActive: { bg: '#e8f7ee', color: '#16643a', border: '#b8e4ca' },
-  statusArchived: { bg: '#eceae6', color: '#aba69e', border: '#d4d0ca' },
-  statusPending: { bg: '#fef6e8', color: '#8a6d20', border: '#eedcaa' },
+  statusActive: { bg: '#e3f1e8', color: '#2f7d54', border: '#bfe0cd' },
+  statusArchived: { bg: '#efece3', color: '#93908a', border: '#d6d1c2' },
+  statusPending: { bg: '#f7ecd1', color: '#8a5b0d', border: '#e9d6ab' },
 
-  badgeSharedBg: '#dbeafe',
-  badgeSharedText: '#1d4ed8',
-  badgePrivateBg: '#fef3c7',
-  badgePrivateText: '#92400e',
+  badgeSharedBg: '#ecedfb',
+  badgeSharedText: '#2e3392',
+  badgePrivateBg: '#f7ecd1',
+  badgePrivateText: '#8a5b0d',
 
-  scrollThumb: '#e2dfda',
-  scrollThumbHover: '#d4d0ca',
+  scrollThumb: '#d6d1c2',
+  scrollThumbHover: '#c4bda8',
 
-  barBg: '#eceae6',
-  barFill: 'linear-gradient(90deg, #eceae6, #c2700a)',
+  barBg: '#efece3',
+  barFill: 'linear-gradient(90deg, #efece3, #b07415)',
 };
 
 export const darkTheme: Theme = {
