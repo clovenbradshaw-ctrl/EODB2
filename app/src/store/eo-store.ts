@@ -23,7 +23,7 @@ import {
   type PersistenceCoordinator,
 } from '../db/persistence-coordinator';
 import type { EoEvent, EoEventInput, EoState, HorizonResponse } from '../db/types';
-import type { SyncManager } from '../matrix/sync-manager';
+import type { PeerSync } from '../matrix/peer-sync';
 import type { ResolvedPermissions } from '../permissions/types';
 import type { ManifestState as UserManifest } from '../permissions/space-manifest';
 import { eventHash } from '../db/hash';
@@ -156,7 +156,7 @@ interface EoDbState {
    */
   persistence: PersistenceCoordinator | null;
   /** The sync manager for sending events to Matrix */
-  syncManager: SyncManager | null;
+  syncManager: PeerSync | null;
   /** Recent events processed through the fold */
   recentEvents: EoEvent[];
   /** Current sequence number */
@@ -188,7 +188,7 @@ interface EoDbState {
    */
   initLocal: (dbName?: string) => Promise<void>;
 
-  setSyncManager: (syncManager: SyncManager) => void;
+  setSyncManager: (syncManager: PeerSync) => void;
   setPermissions: (permissions: ResolvedPermissions | null) => void;
   setUserManifest: (manifest: UserManifest | null) => void;
   /**
@@ -461,7 +461,7 @@ export const useEoStore = create<EoDbState>((set, get) => ({
     set({ onDispatch: fn });
   },
 
-  setSyncManager(syncManager: SyncManager) {
+  setSyncManager(syncManager: PeerSync) {
     set({ syncManager });
   },
 
@@ -486,16 +486,8 @@ export const useEoStore = create<EoDbState>((set, get) => ({
   },
 
   async dispatch(event: EoEventInput) {
-    const { store, syncManager } = get();
+    const { store } = get();
     if (!store) throw new Error('Store not initialized');
-
-    // If a SyncManager (not PeerSync) is active, route through it so it can
-    // broadcast to the Matrix room timeline. PeerSync handles sync via
-    // to-device messages on its own schedule — dispatch locally for PeerSync.
-    if (syncManager && 'processLocalEvent' in syncManager) {
-      const seq = await (syncManager as any).processLocalEvent(event);
-      return seq;
-    }
 
     // Pre-populate client_event_id for server deduplication.
     const now = new Date().toISOString();

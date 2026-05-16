@@ -11,7 +11,6 @@ import {
 import { Modal } from './Modal';
 import { CommandPalette, type Command } from './CommandPalette';
 import { createFoldWorkerClient, initFoldWorker, type FoldWorkerClient } from '../db/lazy-fold';
-import { SyncManager } from '../matrix/sync-manager';
 import { PeerSync } from '../matrix/peer-sync';
 import { WebRTCPeer } from '../matrix/webrtc-peer';
 import {
@@ -528,8 +527,6 @@ function describeMatrixError(err: any): { phase: 'auth' | 'crypto' | 'sync' | 'r
 
 interface CachedSpace {
   workerClient: FoldWorkerClient;
-  /** Kept for teardown of old sessions; null in new spaces that use PeerSync. */
-  syncManager: SyncManager | null;
   peerSync: PeerSync | null;
   webrtcPeer: WebRTCPeer | null;
   mainRoomId: string | null;
@@ -817,7 +814,6 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
     try { cached.workerClient.worker.terminate(); } catch { /* best effort */ }
     try { cached.peerSync?.destroy(); } catch { /* best effort */ }
     try { cached.webrtcPeer?.stop(); } catch { /* best effort */ }
-    try { cached.syncManager?.destroy(); } catch { /* best effort */ }
     try { cached.presence?.stop(); } catch { /* best effort */ }
     spaceCacheRef.current.delete(target);
   }
@@ -1859,11 +1855,6 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
           }
         }
 
-        // Restore cached sync manager (legacy path — null in new spaces)
-        if (existing.syncManager) {
-          useEoStore.getState().setSyncManager(existing.syncManager);
-        }
-
         // Start PeerSync if room is now available but wasn't on the first run
         if (MATRIX_ENABLED && spaceRoomId && matrixClientRef.current && !existing.peerSync) {
           try {
@@ -1922,7 +1913,7 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
       const eager = eagerWorkerRef.current;
       const usingEager = eager !== null && eager.spaceId === selectedSpace!;
       const workerClient = usingEager ? eager.client : createFoldWorkerClient();
-      cache.set(selectedSpace!, { workerClient, syncManager: null, peerSync: null, webrtcPeer: null, mainRoomId: null, presence: null, spaceRooms: null });
+      cache.set(selectedSpace!, { workerClient, peerSync: null, webrtcPeer: null, mainRoomId: null, presence: null, spaceRooms: null });
 
       let initError: unknown;
       // Captured from the ready message so eo-store.init can compare it
@@ -2142,7 +2133,7 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
 
       // Update the cached entry with sync services (worker was cached earlier
       // to prevent race conditions; now enrich with fully-initialized services).
-      cache.set(selectedSpace!, { workerClient, syncManager: null, peerSync, webrtcPeer, mainRoomId: spaceRoomId, presence: presenceInstance, spaceRooms: resolvedSpaceRooms });
+      cache.set(selectedSpace!, { workerClient, peerSync, webrtcPeer, mainRoomId: spaceRoomId, presence: presenceInstance, spaceRooms: resolvedSpaceRooms });
     }
 
     setupSpaceStore();
@@ -2295,18 +2286,7 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
     if (isTerminalSessionPhase(sessionPhaseRef.current)) return;
     sessionPhaseRef.current = 'purging';
 
-    // Save snapshots for ALL cached spaces before clearing state.
     const cache = spaceCacheRef.current;
-    const savePromises: Promise<unknown>[] = [];
-    for (const [, cached] of cache) {
-      if (cached.syncManager) {
-        savePromises.push(cached.syncManager.saveSnapshot().catch((err) => {
-              console.warn('[EO-DB] Snapshot save failed:', err);
-            }));
-      }
-    }
-    await Promise.all(savePromises);
-
     for (const [, cached] of cache) {
       cached.workerClient.worker.terminate();
     }
@@ -2344,46 +2324,12 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
     void handleLogoutRef.current();
   }, [connectionError]);
 
-  // Handle tab visibility changes.
-  //
-  // On `hidden`: save SyncManager snapshot (cheap; only fires for older spaces
-  //   that don't use PeerSync).
-  //
-  // On `visible`: re-announce PeerSync presence so peers push us anything we
-  //   missed while the tab was backgrounded.
-  //
-  // On `beforeunload`: save snapshots for durability before the tab closes.
+  // On returning to a visible tab, re-announce PeerSync presence so peers
+  // push us anything we missed while the tab was backgrounded. (Durability
+  // is handled continuously: every edit is written to the Matrix room
+  // timeline and to the OPFS log on dispatch — there is nothing to "save
+  // on hide".)
   useEffect(() => {
-    let fullSaveInFlight = false;
-
-    const fullSaveAll = async () => {
-      if (fullSaveInFlight) return;
-      fullSaveInFlight = true;
-      try {
-        const promises: Promise<unknown>[] = [];
-        for (const [, cached] of spaceCacheRef.current) {
-          if (cached.syncManager) {
-            promises.push(cached.syncManager.saveSnapshot().catch((err) => {
-              console.warn('[EO-DB] Snapshot save failed:', err);
-            }));
-          }
-        }
-        await Promise.all(promises);
-      } finally {
-        fullSaveInFlight = false;
-      }
-    };
-
-    const lightSaveOnHide = () => {
-      for (const [, cached] of spaceCacheRef.current) {
-        if (cached.syncManager) {
-          cached.syncManager.saveSnapshot().catch((err) => {
-            console.warn('[EO-DB] Snapshot save failed:', err);
-          });
-        }
-      }
-    };
-
     const refreshOnVisible = () => {
       for (const [, cached] of spaceCacheRef.current) {
         if (cached.peerSync) {
@@ -2395,20 +2341,12 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
     };
 
     const handleVisibilityChange = () => {
-      if (document.visibilityState === 'hidden') {
-        lightSaveOnHide();
-      } else if (document.visibilityState === 'visible') {
-        refreshOnVisible();
-      }
+      if (document.visibilityState === 'visible') refreshOnVisible();
     };
 
-    const handleBeforeUnload = () => { fullSaveAll(); };
-
     document.addEventListener('visibilitychange', handleVisibilityChange);
-    window.addEventListener('beforeunload', handleBeforeUnload);
     return () => {
       document.removeEventListener('visibilitychange', handleVisibilityChange);
-      window.removeEventListener('beforeunload', handleBeforeUnload);
     };
   }, []);
 
@@ -2740,7 +2678,6 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
                 // Cache with full topology so Settings and sync resolve correctly
                 spaceCacheRef.current.set(spaceTarget, {
                   workerClient: newSpaceWorker,
-                  syncManager: null,
                   peerSync: null,
                   webrtcPeer: null,
                   mainRoomId,

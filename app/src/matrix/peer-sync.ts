@@ -27,7 +27,7 @@ import { getKeyById, resolveSnapshotKeyId } from '../crypto/segment-keys';
 import { encryptPeerPayload, decryptPeerPayload } from '../crypto/snapshot-crypto';
 import { selectTransport, executeSync, type TransportRouterDeps, type PeerInfo } from './transport-router';
 import type { WebRTCPeer } from './webrtc-peer';
-import { sendEoEvent } from './event-bridge';
+import { sendEoEvent, EO_EVENT_TYPE, matrixEventToEo } from './event-bridge';
 import { enqueueOfflineEvent, flushOfflineQueue } from './offline-queue';
 
 const _syncTypes = peerSyncEventTypes();
@@ -72,6 +72,9 @@ export class PeerSync {
 
   /** `window` online-event handler — flushes the offline queue on reconnect. */
   private onlineHandler?: () => void;
+
+  /** Room.timeline listener — folds EO events from the canonical timeline. */
+  private timelineHandler?: (event: MatrixEvent) => void;
 
   /**
    * Serialization chain for to-device handler invocations.
@@ -185,6 +188,20 @@ export class PeerSync {
     };
     this.client.on('toDeviceEvent' as any, this.toDeviceHandler);
 
+    // Live room-timeline listener. The room timeline is the canonical sync
+    // source — this is how a long-running session picks up other users'
+    // edits (and its own echoes) without waiting for a gap-fill cycle or a
+    // reload. To-device messaging above is only the fast peer layer.
+    this.timelineHandler = (event: MatrixEvent) => {
+      if (event.getRoomId() !== this.roomId) return;
+      if (event.getType() !== EO_EVENT_TYPE) return;
+      const prev = this.handlerChain;
+      const next = prev.catch(() => {}).then(() => this.handleTimelineEvent(event));
+      this.handlerChain = next;
+      next.catch(() => {});
+    };
+    this.client.on('Room.timeline' as any, this.timelineHandler);
+
     // Run the host-provided chain SEG (typically hydrateBlocksIfStale)
     // before peer announce. This guarantees a SEG against the homeserver
     // chain head on every start() — even if the UI shell forgets to
@@ -242,6 +259,21 @@ export class PeerSync {
   }
 
   /**
+   * Fold an EO event delivered on the room timeline. The fold engine dedups
+   * via client_event_id, so this user's own echoed-back events and anything
+   * already gap-filled via to-device are harmless no-ops.
+   */
+  private async handleTimelineEvent(event: MatrixEvent): Promise<void> {
+    const input = matrixEventToEo(event);
+    if (!input.op || !input.target) return;
+    try {
+      await processEvent(this.store, input, this.onEvent);
+    } catch (e) {
+      console.warn('[EO-DB] PeerSync: timeline event fold failed:', e);
+    }
+  }
+
+  /**
    * Stop peer sync — remove the event listener and cancel the heartbeat.
    */
   stop(): void {
@@ -252,6 +284,10 @@ export class PeerSync {
     if (this.toDeviceHandler) {
       this.client.removeListener('toDeviceEvent' as any, this.toDeviceHandler);
       this.toDeviceHandler = undefined;
+    }
+    if (this.timelineHandler) {
+      this.client.removeListener('Room.timeline' as any, this.timelineHandler);
+      this.timelineHandler = undefined;
     }
     if (this.onlineHandler && typeof window !== 'undefined') {
       window.removeEventListener('online', this.onlineHandler);

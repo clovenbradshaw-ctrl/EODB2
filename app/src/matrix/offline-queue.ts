@@ -101,3 +101,28 @@ export function offlineQueueDepth(roomId: string): Promise<number> {
     return queue.length;
   });
 }
+
+/**
+ * Delete the entire offline-queue database. Called on logout so queued
+ * writes from a prior session are not replayed under a new account.
+ * Best-effort — never rejects.
+ */
+export function eraseOfflineQueue(): Promise<void> {
+  return serial(async () => {
+    // Drop the cached connection first so the delete is not blocked.
+    if (dbPromise) {
+      try { (await dbPromise).close(); } catch { /* ignore */ }
+      dbPromise = null;
+    }
+    await new Promise<void>((resolve) => {
+      try {
+        const req = indexedDB.deleteDatabase(DB_NAME);
+        req.onsuccess = () => resolve();
+        req.onerror = () => resolve();
+        req.onblocked = () => resolve();
+      } catch {
+        resolve();
+      }
+    });
+  });
+}

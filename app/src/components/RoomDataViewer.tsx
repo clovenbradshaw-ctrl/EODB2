@@ -2,8 +2,36 @@ import { useState, useEffect, useMemo } from 'react';
 import type { MatrixClient, MatrixEvent } from 'matrix-js-sdk';
 import { useEoStore } from '../store/eo-store';
 import { useTheme, type Theme } from '../theme';
-import type { RoomDataSnapshot } from '../matrix/sync-manager';
 import { getDataRoom } from '../matrix/event-bridge';
+
+/** Raw Matrix room data, assembled here for the debug/inspection view. */
+interface RoomDataSnapshot {
+  roomId: string;
+  roomAlias: string;
+  name: string | null;
+  topic: string | null;
+  memberCount: number;
+  members: Array<{ userId: string; displayName: string | null; membership: string }>;
+  encryptionEnabled: boolean;
+  encryptionAlgorithm: string | null;
+  timelineLength: number;
+  timeline: Array<{
+    eventId: string;
+    type: string;
+    sender: string;
+    ts: number;
+    content: any;
+  }>;
+  stateEvents: Array<{
+    type: string;
+    stateKey: string;
+    sender: string;
+    content: any;
+  }>;
+  roomVersion: string | null;
+  joinRule: string | null;
+  historyVisibility: string | null;
+}
 
 interface RoomDataViewerProps {
   onBack: () => void;
