@@ -920,22 +920,33 @@ export function TableView({ scope, onSelectRecord, onViewHistory, onEmptyScope, 
           console.debug('[TableView] initial page yielded 0 visible records of', rows.length, 'for', scope);
         }
 
-        // Phase 2: stream remaining records in background batches
+        // Phase 2: stream remaining records in background batches.
+        // `accumulated` is mutated in place, so the old per-batch
+        // `[...accumulated, ...more]` copy — O(n²) across the whole stream —
+        // is gone. React state is published from a fresh slice only every
+        // PUBLISH_EVERY records, not once per 500-record batch: a 100k-row
+        // table re-runs its records-derived memos ~25 times, not 200.
         let cursor = nextCursor;
-        let accumulated = direct;
+        const accumulated: EoState[] = direct.slice();
+        const PUBLISH_EVERY = 4000;
+        let publishedAt = accumulated.length;
         while (cursor !== null) {
           if (gen !== fetchGenRef.current) return;
           const { rows: more, nextCursor: next } = await getStateByPrefixPage(scope + '.', BATCH_SIZE, cursor);
           if (gen !== fetchGenRef.current) return;
           const moreDirect = filterDirect(more);
-          accumulated = [...accumulated, ...moreDirect];
-          setRecords(accumulated);
+          for (const r of moreDirect) accumulated.push(r);
           // Unblock the UI the moment the first non-empty batch arrives.
           if (!recordsLoadedRef.current && accumulated.length > 0) {
             setRecordsLoaded(true);
           }
+          if (accumulated.length - publishedAt >= PUBLISH_EVERY) {
+            publishedAt = accumulated.length;
+            setRecords(accumulated.slice());
+          }
           cursor = next;
         }
+        setRecords(accumulated.slice());
         // Streaming finished — authoritative empty is safe to surface now.
         if (!recordsLoadedRef.current) setRecordsLoaded(true);
         emptySyncCountRef.current = 0;
