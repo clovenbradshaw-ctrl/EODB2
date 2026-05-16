@@ -1340,9 +1340,24 @@ async function handleINS(store: EoStore, event: EoEvent): Promise<void> {
   }
 
   const operand = event.operand ?? {};
-  const value = typeof operand === 'object' && !Array.isArray(operand)
-    ? { ...operand }
-    : operand;
+  const isFieldObject = typeof operand === 'object' && !Array.isArray(operand);
+  const value = isFieldObject ? { ...operand } : operand;
+
+  // Seed per-field write provenance from the creation event, so a later DEF
+  // resolves its timestamp against a real baseline rather than winning by
+  // default. (See handleDEF / FieldWrite.)
+  if (isFieldObject) {
+    const insWrite: FieldWrite = {
+      ts: event.ts,
+      agent: event.agent,
+      cid: event.client_event_id ?? '',
+    };
+    const writes: Record<string, FieldWrite> = {};
+    for (const field of Object.keys(operand as Record<string, unknown>)) {
+      if (!field.startsWith('_')) writes[field] = insWrite;
+    }
+    (value as Record<string, unknown>)._writes = writes;
+  }
 
   await setState(store, {
     target: event.target,
@@ -1573,6 +1588,36 @@ async function handleSIG(store: EoStore, event: EoEvent): Promise<void> {
 // checkAndPromote guarantees INS has fired before handleDEF runs.
 // Includes Creator ownership check: agents with PL 10-24 can only DEF
 // records they created (identified by _created_by field).
+
+/**
+ * Per-field write provenance, recorded on `state.value._writes`. Only
+ * globally-identical event fields are stored — never the local `seq`, which
+ * a partition heal assigns differently on each device — so the projection
+ * is identical on every peer.
+ */
+interface FieldWrite {
+  ts: string;
+  agent: string;
+  cid: string;
+}
+
+/**
+ * Order two field writes. Returns > 0 when `a` wins, < 0 when `b` wins.
+ *
+ * The EO default: the latest real-world timestamp wins. Ties break by
+ * `client_event_id` (a content hash) then `agent` — both identical on every
+ * device — so the winner is the same regardless of the order the fold
+ * happened to process concurrent edits in. `seq` is deliberately NOT used:
+ * it is assigned at local fold time and would diverge across peers.
+ */
+function compareFieldWrites(a: FieldWrite, b: FieldWrite): number {
+  const ta = Date.parse(a.ts) || 0;
+  const tb = Date.parse(b.ts) || 0;
+  if (ta !== tb) return ta - tb;
+  if (a.cid !== b.cid) return a.cid < b.cid ? -1 : 1;
+  return a.agent < b.agent ? -1 : a.agent > b.agent ? 1 : 0;
+}
+
 async function handleDEF(store: EoStore, event: EoEvent): Promise<void> {
   const target = await resolveAlias(store, event.target);
 
@@ -1599,6 +1644,45 @@ async function handleDEF(store: EoStore, event: EoEvent): Promise<void> {
   }
 
   const merged = mergeOperand(existing?.value, event.operand);
+
+  // ── EO conflict resolution: latest real-world timestamp wins, per field ──
+  // `mergeOperand` let this event's fields blindly overwrite — that is
+  // fold-order resolution, so after a partition heal the "winner" would be
+  // whoever synced last, not whoever edited last. Re-resolve each real field
+  // by the logged `ts` (the EO default) and keep per-field write provenance
+  // in `_writes`. A write that loses the timestamp race is not applied, but
+  // its event stays in the append-only log — the conflict is never lost, and
+  // is surfaced by querying the log (whereContested), the source of truth,
+  // rather than by a projection-cached flag (which cannot be made
+  // fold-order-independent without storing full per-field history).
+  // Formula operands are whole-value, not field-merged — left to mergeOperand.
+  if (
+    event.operand && typeof event.operand === 'object' &&
+    !Array.isArray(event.operand) && !isFormulaOperand(event.operand)
+  ) {
+    const prevValue = (existing?.value ?? {}) as Record<string, unknown>;
+    const prevWrites =
+      (prevValue._writes as Record<string, FieldWrite> | undefined) ?? {};
+    const writes: Record<string, FieldWrite> = { ...prevWrites };
+    const incoming: FieldWrite = {
+      ts: event.ts,
+      agent: event.agent,
+      cid: event.client_event_id ?? '',
+    };
+    for (const field of Object.keys(event.operand as Record<string, unknown>)) {
+      if (field.startsWith('_')) continue; // control keys, not data fields
+      const current = prevWrites[field];
+      if (!current || compareFieldWrites(incoming, current) > 0) {
+        // Latest write — it wins; `merged` already holds its value.
+        writes[field] = incoming;
+      } else {
+        // A concurrent edit that lost the timestamp race — keep the winning
+        // value. The losing event remains in the log for audit/surfacing.
+        merged[field] = prevValue[field];
+      }
+    }
+    merged._writes = writes;
+  }
 
   // Clear _sigs for saved fields, then prune any stale entries from dead tabs.
   let finalValue = merged;
