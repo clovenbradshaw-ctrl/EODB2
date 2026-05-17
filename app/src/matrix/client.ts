@@ -3,6 +3,29 @@ import * as sdk from 'matrix-js-sdk';
 const SESSION_KEY = 'eo-db-session';
 const DEVICE_ID_KEY = 'eo-db-device-id';
 
+/** Hard ceiling on a single login round-trip. A slow or unreachable
+ *  homeserver should surface an error, not spin "Signing in..." forever. */
+const LOGIN_TIMEOUT_MS = 30_000;
+
+/**
+ * Reject with a network-flavoured error if `promise` does not settle within
+ * `ms`. The error's `name` is `ConnectionError` so callers' network-error
+ * detection treats a timeout the same as an unreachable host.
+ */
+export function withTimeout<T>(promise: Promise<T>, ms: number, label: string): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const timer = setTimeout(() => {
+      const err = new Error(`${label} timed out after ${ms}ms`);
+      err.name = 'ConnectionError';
+      reject(err);
+    }, ms);
+    promise.then(
+      (v) => { clearTimeout(timer); resolve(v); },
+      (e) => { clearTimeout(timer); reject(e); },
+    );
+  });
+}
+
 export interface MatrixSession {
   userId: string;
   deviceId: string;
@@ -53,7 +76,11 @@ export async function login(homeserver: string, username: string, password: stri
     loginBody.device_id = persistedDeviceId;
   }
 
-  const response = await client.login('m.login.password', loginBody);
+  const response = await withTimeout(
+    client.login('m.login.password', loginBody),
+    LOGIN_TIMEOUT_MS,
+    'Login request',
+  );
 
   const session: MatrixSession = {
     userId: response.user_id,
@@ -62,10 +89,19 @@ export async function login(homeserver: string, username: string, password: stri
     homeserver: baseUrl,
   };
 
-  // Persist deviceId for the duration of this session
+  persistSession(session);
+  return session;
+}
+
+/**
+ * Persist a session (and its deviceId) to localStorage so it survives a
+ * page reload. Called by `login` and by the offline-login fallback — the
+ * latter previously left the session unpersisted, forcing a re-login on
+ * every refresh.
+ */
+export function persistSession(session: MatrixSession): void {
   localStorage.setItem(DEVICE_ID_KEY, session.deviceId);
   localStorage.setItem(SESSION_KEY, JSON.stringify(session));
-  return session;
 }
 
 /**
