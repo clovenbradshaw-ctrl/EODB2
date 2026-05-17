@@ -1,5 +1,5 @@
 import { useState, useEffect, type FormEvent } from 'react';
-import { login, normalizeHomeserver, toMatrixUserId, type MatrixSession } from '../matrix/client';
+import { login, normalizeHomeserver, persistSession, toMatrixUserId, type MatrixSession } from '../matrix/client';
 import { saveOfflineCredentials, verifyOfflineCredentials, listOfflineAccounts } from '../lib/offline-auth';
 import { useTheme, type Theme } from '../theme';
 
@@ -79,6 +79,12 @@ export function Login({ onLogin, onLocalMode }: LoginProps) {
           }
         }
       }
+
+      // The online `login()` path already persists the session; the offline
+      // fallbacks above do not. Persist unconditionally so a session obtained
+      // via `verifyOfflineCredentials` survives a page reload instead of
+      // forcing the user to log in again on every refresh.
+      persistSession(session);
 
       onLogin(session);
     } catch (err: any) {

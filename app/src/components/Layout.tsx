@@ -1,5 +1,5 @@
 import { useState, useEffect, useLayoutEffect, useRef, useMemo, useCallback, lazy, Suspense, type ComponentType } from 'react';
-import { createMatrixClient, type MatrixSession } from '../matrix/client';
+import { createMatrixClient, withTimeout, type MatrixSession } from '../matrix/client';
 import { useEoStore } from '../store/eo-store';
 import { persistSpaceMeta, listSpaceMeta, saveSpaceMeta, removeSpaceMeta } from '../db/space-meta';
 import { clearSpaceLocalData } from '../db/clear-space-data';
@@ -1164,7 +1164,15 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
         // Initialize Rust crypto so E2EE rooms can send/receive decrypted messages.
         // Uses IndexedDB to persist device keys & megolm sessions across reloads.
         try {
-          await client.initRustCrypto({ useIndexedDB: true });
+          // Bound the crypto init: a hung WASM load or an IndexedDB upgrade
+          // blocked by another tab must not block startClient() — and with it
+          // matrixReady — forever. A timeout is treated like any other crypto
+          // failure: E2EE is degraded but the UI still comes up.
+          await withTimeout(
+            client.initRustCrypto({ useIndexedDB: true }),
+            20_000,
+            'Matrix crypto init',
+          );
           try {
             await client.getCrypto()?.bootstrapCrossSigning({});
           } catch (e) {
@@ -1182,7 +1190,11 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
             console.warn('[EO-DB] Stale crypto store (device mismatch) — clearing and retrying.');
             await clearMatrixCryptoStore();
             try {
-              await client.initRustCrypto({ useIndexedDB: true });
+              await withTimeout(
+                client.initRustCrypto({ useIndexedDB: true }),
+                20_000,
+                'Matrix crypto init',
+              );
               try { await client.getCrypto()?.bootstrapCrossSigning({}); } catch { /* best effort */ }
             } catch (e2) {
               console.warn('[EO-DB] rust crypto init failed after store clear:', e2);
