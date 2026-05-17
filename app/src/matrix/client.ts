@@ -33,12 +33,73 @@ export function toMatrixUserId(username: string, homeserver: string): string {
   return `@${user}:${host}`;
 }
 
+/** Strip scheme/trailing slash from a homeserver input to a bare domain. */
+function toDomain(input: string): string {
+  return input.trim().replace(/^https?:\/\//i, '').replace(/\/+$/, '');
+}
+
+export type DiscoveryState = 'ok' | 'unreachable' | 'invalid';
+
+export interface DiscoveryResult {
+  /** The real client-API base URL, or null when it could not be resolved. */
+  baseUrl: string | null;
+  state: DiscoveryState;
+  error?: string;
+}
+
+/**
+ * Resolve a Matrix server name to its real client-API base URL using the
+ * standard `.well-known/matrix/client` discovery.
+ *
+ * This is required for homeservers that delegate their client API to a
+ * different host than the server name (e.g. a domain that serves a web
+ * client at `/` and publishes `.well-known` to point clients elsewhere).
+ * Connecting directly to `https://<server-name>/_matrix/...` in that case
+ * hits the wrong vhost and the CORS preflight fails. When the server
+ * publishes no `.well-known`, we fall back to a direct connection.
+ */
+export async function discoverClientConfig(serverName: string): Promise<DiscoveryResult> {
+  const domain = toDomain(serverName);
+  let config: Awaited<ReturnType<typeof sdk.AutoDiscovery.findClientConfig>>;
+  try {
+    config = await sdk.AutoDiscovery.findClientConfig(domain);
+  } catch (e: any) {
+    return { baseUrl: null, state: 'unreachable', error: e?.message ?? String(e) };
+  }
+  const hs = config['m.homeserver'];
+  const error = typeof hs.error === 'string' ? hs.error : undefined;
+  switch (hs.state) {
+    case sdk.AutoDiscovery.SUCCESS:
+      return { baseUrl: hs.base_url ?? `https://${domain}`, state: 'ok' };
+    case sdk.AutoDiscovery.PROMPT:
+      // No .well-known delegation published — connect directly to the domain.
+      return { baseUrl: `https://${domain}`, state: 'ok' };
+    case sdk.AutoDiscovery.FAIL_ERROR:
+      return { baseUrl: hs.base_url ?? null, state: 'unreachable', error };
+    default: // FAIL_PROMPT / IGNORE — .well-known present but unusable.
+      return { baseUrl: hs.base_url ?? null, state: 'invalid', error };
+  }
+}
+
 /**
  * Authenticate against the given Matrix homeserver.
+ *
+ * `serverName` is the homeserver's server name (the part after `:` in a
+ * user ID, e.g. `hyphae.social`). The real client-API URL is resolved via
+ * `.well-known` discovery before logging in.
+ *
  * Returns a session object stored in localStorage for persistence.
  */
-export async function login(homeserver: string, username: string, password: string): Promise<MatrixSession> {
-  const baseUrl = normalizeHomeserver(homeserver);
+export async function login(serverName: string, username: string, password: string): Promise<MatrixSession> {
+  const discovery = await discoverClientConfig(serverName);
+  if (discovery.state !== 'ok' || !discovery.baseUrl) {
+    const err = new Error(
+      discovery.error || `Could not reach a Matrix homeserver for "${toDomain(serverName)}"`,
+    ) as Error & { discoveryState: DiscoveryState };
+    err.discoveryState = discovery.state;
+    throw err;
+  }
+  const baseUrl = discovery.baseUrl;
   const client = sdk.createClient({ baseUrl });
 
   // Reuse the persisted deviceId if present (only survives within a session;

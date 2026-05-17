@@ -1,5 +1,5 @@
 import { useState, useEffect, type FormEvent } from 'react';
-import { login, normalizeHomeserver, toMatrixUserId, type MatrixSession } from '../matrix/client';
+import { login, toMatrixUserId, type MatrixSession, type DiscoveryState } from '../matrix/client';
 import { saveOfflineCredentials, verifyOfflineCredentials, listOfflineAccounts } from '../lib/offline-auth';
 import { useTheme, type Theme } from '../theme';
 
@@ -46,14 +46,13 @@ export function Login({ onLogin, onLocalMode }: LoginProps) {
     setError('');
     setLoading(true);
 
-    const baseUrl = normalizeHomeserver(effectiveHomeserver);
     const userId = toMatrixUserId(loginUsername, effectiveHomeserver);
 
     try {
       let session: MatrixSession | null = null;
 
       if (isOffline) {
-        session = await verifyOfflineCredentials(baseUrl, userId, password);
+        session = await verifyOfflineCredentials(userId, password);
         if (!session) {
           setError('Offline login failed — wrong password or no saved credentials');
           setLoading(false);
@@ -64,11 +63,28 @@ export function Login({ onLogin, onLocalMode }: LoginProps) {
           session = await login(effectiveHomeserver, loginUsername, password);
           await saveOfflineCredentials(session, password);
         } catch (err: any) {
-          if (isNetworkError(err)) {
-            setIsOffline(true);
-            session = await verifyOfflineCredentials(baseUrl, userId, password);
+          // `login()` re-runs `.well-known` discovery on every attempt, so a
+          // retry recovers automatically once the homeserver is reachable —
+          // never latch into a sticky offline state here.
+          const discoveryState: DiscoveryState | undefined = err.discoveryState;
+
+          if (discoveryState === 'invalid') {
+            setError(
+              `"${effectiveHomeserver}" responded but is not a valid Matrix homeserver ` +
+                `(check its .well-known/matrix/client).`,
+            );
+            setLoading(false);
+            return;
+          }
+
+          const unreachable = discoveryState === 'unreachable' || isNetworkError(err);
+          if (unreachable) {
+            session = await verifyOfflineCredentials(userId, password);
             if (!session) {
-              setError('Network unavailable and no offline credentials found');
+              setError(
+                `Can't reach the homeserver for "${effectiveHomeserver}". It may be down ` +
+                  `or blocking the app — and no offline credentials are saved.`,
+              );
               setLoading(false);
               return;
             }

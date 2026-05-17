@@ -90,9 +90,10 @@ export async function saveOfflineCredentials(
   const encrypted = await aesEncrypt(key, plaintext);
 
   const db = await openAuthDb();
-  // Key by homeserver + userId so multiple accounts can coexist
-  const storeKey = `${session.homeserver}|${session.userId}`;
-  await db.put(STORE_NAME, { salt, encrypted }, storeKey);
+  // Keyed by the globally-unique Matrix user ID. This is stable regardless of
+  // how the homeserver's client-API URL is resolved (direct vs .well-known
+  // discovery), so offline login works without needing a network lookup.
+  await db.put(STORE_NAME, { salt, encrypted }, session.userId);
   db.close();
 }
 
@@ -101,13 +102,11 @@ export async function saveOfflineCredentials(
  * Returns the session if the password is correct, null otherwise.
  */
 export async function verifyOfflineCredentials(
-  homeserver: string,
   userId: string,
   password: string,
 ): Promise<MatrixSession | null> {
   const db = await openAuthDb();
-  const storeKey = `${homeserver}|${userId}`;
-  const record = await db.get(STORE_NAME, storeKey);
+  const record = await db.get(STORE_NAME, userId);
   db.close();
 
   if (!record) return null;
@@ -124,29 +123,21 @@ export async function verifyOfflineCredentials(
 }
 
 /**
- * List homeserver+userId pairs that have stored offline credentials.
+ * List the Matrix user IDs that have stored offline credentials.
  * Useful for showing which accounts are available for offline login.
  */
-export async function listOfflineAccounts(): Promise<{ homeserver: string; userId: string }[]> {
+export async function listOfflineAccounts(): Promise<string[]> {
   const db = await openAuthDb();
   const keys = await db.getAllKeys(STORE_NAME);
   db.close();
-
-  return (keys as string[]).map((k) => {
-    const [homeserver, userId] = k.split('|');
-    return { homeserver, userId };
-  });
+  return keys as string[];
 }
 
 /**
  * Remove stored offline credentials for an account.
  */
-export async function clearOfflineCredentials(
-  homeserver: string,
-  userId: string,
-): Promise<void> {
+export async function clearOfflineCredentials(userId: string): Promise<void> {
   const db = await openAuthDb();
-  const storeKey = `${homeserver}|${userId}`;
-  await db.delete(STORE_NAME, storeKey);
+  await db.delete(STORE_NAME, userId);
   db.close();
 }
