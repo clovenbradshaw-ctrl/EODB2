@@ -131,7 +131,7 @@ import { addArchivedSpace, isSpaceArchived, removeArchivedSpace, getArchivedSpac
 import { setSpaceConfig, getSpaceConfig, applyEoPowerLevels, EO_SPACE_CONFIG_TYPE } from '../permissions/room-topology';
 import { EO_POWER_LEVEL_CONTENT } from '../permissions/types';
 import { listAllHomeserverUsers } from '../matrix/user-discovery';
-import { withRetry } from '../matrix/connection-resilience';
+import { withRetry, withTimeout, TimeoutError } from '../matrix/connection-resilience';
 import { invalidateStatsCache } from '../db/space-statistics';
 import { useApiConnectionStore } from '../store/api-connection-store';
 
@@ -1734,7 +1734,25 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
      * (via persistSpaceMeta) so future runs never lose a known room ID.
      */
     async function resolveRoom(): Promise<string | null> {
-      const roomId = await resolveOrCreateRoom();
+      // Bound the whole resolution pipeline: its Matrix network calls
+      // (joinRoom, resolveRoomAlias, publicRooms, createRoom…) have no
+      // timeout of their own, so a hung homeserver would leave the UI stuck
+      // on "Resolving room…" forever with no error and no retry affordance.
+      let roomId: string | null;
+      try {
+        roomId = await withTimeout(() => resolveOrCreateRoom(), 30_000, 'Room resolution');
+      } catch (e) {
+        if (isStale()) return null;
+        if (e instanceof TimeoutError) {
+          setConnectionError({
+            phase: 'room',
+            message: 'Resolving the room timed out — the homeserver did not respond. Check your connection and retry.',
+          });
+        } else {
+          console.warn('[EO-DB] Room resolution failed:', e);
+        }
+        return null;
+      }
       if (isStale()) return roomId;  // newer run started, don't update state
 
       if (roomId) {

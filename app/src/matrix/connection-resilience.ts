@@ -72,6 +72,32 @@ function sleep(ms: number, signal?: AbortSignal): Promise<void> {
   });
 }
 
+export class TimeoutError extends Error {
+  constructor(label: string, ms: number) {
+    super(`${label} timed out after ${ms}ms`);
+    this.name = 'TimeoutError';
+  }
+}
+
+/**
+ * Race an async operation against a timeout. Rejects with TimeoutError if
+ * `fn` does not settle within `ms`. The underlying request is not aborted —
+ * this only unblocks the caller so a hung homeserver can't stall it forever.
+ */
+export function withTimeout<T>(
+  fn: () => Promise<T>,
+  ms: number,
+  label = 'operation',
+): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const timer = setTimeout(() => reject(new TimeoutError(label, ms)), ms);
+    fn().then(
+      (v) => { clearTimeout(timer); resolve(v); },
+      (e) => { clearTimeout(timer); reject(e); },
+    );
+  });
+}
+
 /**
  * Retry any async operation with exponential backoff.
  *
