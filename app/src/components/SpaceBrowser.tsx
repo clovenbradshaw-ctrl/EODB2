@@ -23,6 +23,10 @@ interface SpaceBrowserProps {
   loading: boolean;
   /** Whether the Matrix connection is ready (required for space creation) */
   matrixReady?: boolean;
+  /** Whether the current deployment permits creating new spaces. Single-tenant
+   *  homeservers (e.g. Amino) collapse every space into one canonical entry,
+   *  so the "+ New" affordance would only produce orphan duplicates. */
+  canCreate?: boolean;
   activeSpace: string | null;
   onSelect: (spaceTarget: string) => void;
   onClose: () => void;
@@ -64,7 +68,7 @@ function formatDate(ts: number): string {
   });
 }
 
-export function SpaceBrowser({ entries, loading, matrixReady = true, activeSpace, onSelect, onClose, onCreate, onDelete, onArchive, onOpenRecycleBin, deletedCount = 0, archivedCount = 0, publicEntries = [], onRequestAccess, actionError = null, onDismissActionError }: SpaceBrowserProps) {
+export function SpaceBrowser({ entries, loading, matrixReady = true, canCreate = true, activeSpace, onSelect, onClose, onCreate, onDelete, onArchive, onOpenRecycleBin, deletedCount = 0, archivedCount = 0, publicEntries = [], onRequestAccess, actionError = null, onDismissActionError }: SpaceBrowserProps) {
   const { theme } = useTheme();
   const s = makeStyles(theme);
 
@@ -148,14 +152,16 @@ export function SpaceBrowser({ entries, loading, matrixReady = true, activeSpace
             SPACES
           </div>
           <div style={{ display: 'flex', gap: 6 }}>
-            <button
-              style={{ ...s.newButton, ...(!matrixReady ? { opacity: 0.4, cursor: 'not-allowed' } : {}) }}
-              onClick={() => matrixReady && setShowCreate(!showCreate)}
-              title={matrixReady ? 'Create a new space' : 'Matrix must be connected to create spaces'}
-              disabled={!matrixReady}
-            >
-              + New
-            </button>
+            {canCreate && (
+              <button
+                style={{ ...s.newButton, ...(!matrixReady ? { opacity: 0.4, cursor: 'not-allowed' } : {}) }}
+                onClick={() => matrixReady && setShowCreate(!showCreate)}
+                title={matrixReady ? 'Create a new space' : 'Matrix must be connected to create spaces'}
+                disabled={!matrixReady}
+              >
+                + New
+              </button>
+            )}
             <button style={s.closeButton} onClick={onClose}>{'\u2715'}</button>
           </div>
         </div>
@@ -341,7 +347,7 @@ export function SpaceBrowser({ entries, loading, matrixReady = true, activeSpace
         </div>
 
         {/* Create form */}
-        {showCreate && (
+        {showCreate && canCreate && (
           <div style={s.createForm}>
             <div style={s.createLabel}>New Space</div>
             <div style={s.createRow}>
