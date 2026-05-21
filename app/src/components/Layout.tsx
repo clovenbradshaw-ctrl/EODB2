@@ -2612,7 +2612,39 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
 
           <div style={s.divider} />
 
-          {/* Space selector — opens file-browser panel */}
+          {/* Space selector — opens file-browser panel.
+              On Amino single-tenant the deployment hosts exactly one space,
+              so we render an inert badge with no dropdown affordance. */}
+          {isAmino ? (
+            <div
+              style={{
+                ...s.spaceBadge,
+                cursor: 'default',
+                ...(roleAccentColor ? {
+                  borderColor: `${roleAccentColor}60`,
+                  background: `${roleAccentColor}10`,
+                } : {}),
+              }}
+            >
+              <span style={{
+                width: 6, height: 6, borderRadius: '50%',
+                background: roleAccentColor || theme.accent,
+                flexShrink: 0,
+              }} />
+              Amino
+              {activeTypeDef && (
+                <span style={{
+                  fontSize: 9, fontWeight: 600,
+                  color: roleAccentColor || theme.accent,
+                  background: roleAccentColor ? `${roleAccentColor}20` : theme.accentBg,
+                  padding: '1px 6px', borderRadius: 4,
+                  marginLeft: 2,
+                }}>
+                  {activeTypeDef.label}
+                </span>
+              )}
+            </div>
+          ) : (
           <button
             onClick={() => setSpaceOpen(!spaceOpen)}
             style={{
@@ -2629,7 +2661,7 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
               flexShrink: 0,
             }} />
             {selectedSpace
-              ? (isAmino ? 'Amino' : formatSpaceName(selectedSpace.split('.').pop() || ''))
+              ? formatSpaceName(selectedSpace.split('.').pop() || '')
               : 'All Spaces'}
             {activeTypeDef && (
               <span style={{
@@ -2644,8 +2676,9 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
             )}
             <span style={{ fontSize: 8, opacity: 0.5, marginLeft: 2 }}>{spaceOpen ? '\u25B4' : '\u25BE'}</span>
           </button>
+          )}
 
-          {spaceOpen && (
+          {!isAmino && spaceOpen && (
             <SpaceBrowser
               entries={activeEntries}
               loading={MATRIX_ENABLED && !matrixReady && activeEntries.length === 0}
