@@ -12,7 +12,7 @@ import {
   flushOfflineQueue,
   offlineQueueDepth,
 } from '../offline-queue';
-import type { EoEvent } from '../../db/types';
+import type { EoEvent, EoEventInput } from '../../db/types';
 
 let n = 0;
 const ev = (): EoEvent => {
@@ -36,7 +36,7 @@ describe('offline-queue', () => {
     await enqueueOfflineEvent(room, ev());
     expect(await offlineQueueDepth(room)).toBe(2);
 
-    const sent: EoEvent[] = [];
+    const sent: EoEventInput[] = [];
     const result = await flushOfflineQueue(room, async (e) => { sent.push(e); });
 
     expect(result).toEqual({ sent: 2, remaining: 0 });

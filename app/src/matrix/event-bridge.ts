@@ -8,6 +8,7 @@
 import type { MatrixClient, MatrixEvent } from 'matrix-js-sdk';
 import type { EoEventInput } from '../db/types';
 import { eoEventTypes, getDataRoomAlias } from '../lib/matrix-domain';
+import { withRetry } from './connection-resilience';
 
 const _types = eoEventTypes();
 export const EO_EVENT_TYPE = _types.event;
@@ -52,21 +53,30 @@ export const DATA_ROOM_ALIAS = '' as string;
 /**
  * Send an EO event to the encrypted Matrix room.
  * The SDK handles Megolm encryption transparently.
+ *
+ * Wrapped in `withRetry` so transient 429s / network blips do not surface
+ * as a thrown error on the first failure — callers that wrap this in a
+ * loop (publish-events, hydration) would otherwise lose the tail of a
+ * batch when a single send hits a homeserver rate limit. On terminal
+ * failure (retries exhausted or non-transient 4xx) the original error
+ * propagates so callers can route to the offline queue.
  */
 export async function sendEoEvent(
   client: MatrixClient,
   roomId: string,
   event: EoEventInput,
 ): Promise<string> {
-  const result = await client.sendEvent(roomId, EO_EVENT_TYPE as any, {
-    op: event.op,
-    target: event.target,
-    operand: event.operand,
-    client_event_id: event.client_event_id,
-    ts: event.ts,
-    meta: event.meta,
-    // agent is NOT included — derived from Matrix sender
-  });
+  const result = await withRetry(() =>
+    client.sendEvent(roomId, EO_EVENT_TYPE as any, {
+      op: event.op,
+      target: event.target,
+      operand: event.operand,
+      client_event_id: event.client_event_id,
+      ts: event.ts,
+      meta: event.meta,
+      // agent is NOT included — derived from Matrix sender
+    }),
+  );
 
   return result.event_id;
 }
