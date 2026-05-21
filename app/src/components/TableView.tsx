@@ -32,6 +32,7 @@ import { AddColumnDialog } from './AddColumnDialog';
 import { SchemaFieldPanel, type FieldValueStats } from './SchemaFieldPanel';
 import { WatchedFieldsPicker } from './WatchedFieldsPicker';
 import { LinkFieldPicker } from './LinkFieldPicker';
+import { extractLinkIds } from './link-utils';
 import {
   DndContext,
   DragOverlay,
@@ -1672,25 +1673,6 @@ export function TableView({ scope, onSelectRecord, onViewHistory, onEmptyScope, 
   }
 
   const canEdit = sliceReadOnly ? false : (permissions ? (permissions.can_edit_any_record || permissions.can_edit_own_records) : true);
-
-  function extractLinkIds(value: unknown): string[] {
-    if (value == null) return [];
-    if (typeof value === 'string') {
-      if (value.startsWith('[') && value.endsWith(']')) {
-        try {
-          const p = JSON.parse(value);
-          if (Array.isArray(p)) return p.filter((v): v is string => typeof v === 'string');
-        } catch { /* fall through */ }
-      }
-      return value ? [value] : [];
-    }
-    if (Array.isArray(value)) return value.filter((v): v is string => typeof v === 'string');
-    if (typeof value === 'object') {
-      const linked = (value as { linked?: unknown }).linked;
-      if (Array.isArray(linked)) return linked.filter((v): v is string => typeof v === 'string');
-    }
-    return [];
-  }
 
   function resolveLinkedTables(fieldKey: string, currentIds: string[]): string[] {
     const override = columnTypeOverrides.get(fieldKey);

@@ -11,6 +11,7 @@ import { syncEditToAirtable } from '../ingestion/airtable-writeback';
 import { getAirtableTypeIcon, getAirtableTypeColor } from './field-type-icons';
 import { groupSchemaStates, extractEdgeAttrDefs } from '../db/schema-rules';
 import { LinkFieldPicker } from './LinkFieldPicker';
+import { extractLinkIds, extractLinkTargets } from './link-utils';
 import { RelationshipFieldPanel } from './RelationshipFieldPanel';
 import {
   getFieldAuditTrail,
@@ -168,6 +169,13 @@ export function FigureFields({ figure, onNavigate, profileFields, recordTs, allE
   const displayValue = recordTs ? historicValue : (value as Record<string, unknown>);
   let entries = Object.entries(displayValue).filter(([k]) => !k.startsWith('_') && k !== 'linked' && k !== 'edge_type');
 
+  // Airtable-style records store fields under `value.fields`. Writes to those
+  // fields must go through { fields: { [k]: v } } so they update in place
+  // instead of creating a parallel top-level key.
+  const useFieldsSub = !!(value as any)?.fields
+    && typeof (value as any).fields === 'object'
+    && !Array.isArray((value as any).fields);
+
   // Flatten the "fields" sub-object: promote each sub-key to a top-level entry
   const fieldsObj = entries.find(([k]) => k === 'fields');
   if (fieldsObj && typeof fieldsObj[1] === 'object' && fieldsObj[1] !== null && !Array.isArray(fieldsObj[1])) {
@@ -314,14 +322,29 @@ export function FigureFields({ figure, onNavigate, profileFields, recordTs, allE
 
   async function handleLinkRemove(fieldKey: string, idToRemove: string, currentIds: string[]) {
     const updatedIds = currentIds.filter(id => id !== idToRemove);
+    await dispatchLinkUpdate(fieldKey, updatedIds);
+  }
+
+  async function dispatchLinkUpdate(fieldKey: string, updatedIds: string[]) {
+    const operand = useFieldsSub
+      ? { fields: { [fieldKey]: updatedIds } }
+      : { [fieldKey]: updatedIds };
     await dispatch({
       op: 'DEF',
       target: figure.target,
-      operand: { [fieldKey]: updatedIds },
+      operand,
       agent: 'user',
       ts: new Date().toISOString(),
       acquired_ts: new Date().toISOString(),
     });
+    // For Airtable-origin records, push the edit back so the two systems
+    // don't diverge. Fire-and-forget — local state is already updated.
+    syncEditToAirtable({
+      target: figure.target,
+      fieldKey,
+      value: updatedIds,
+      getStateByPrefix,
+    }).catch(console.warn);
   }
 
   return (
@@ -342,19 +365,34 @@ export function FigureFields({ figure, onNavigate, profileFields, recordTs, allE
           try { const p = JSON.parse(val); if (Array.isArray(p)) parsedVal = p; } catch { /* keep */ }
         }
 
-        // Treat entity-ID array values as link fields even without an explicit schema definition
+        // Detect link shape inclusive of the Airtable `{ linked: [...] }` wrapper
+        // (ingestion stores full target paths like "at.appA.tblB.rec001" there).
         const valIsIdArray = isEntityIdArray(parsedVal);
-        const isLinkField = fts?.type === 'link' || fts?.type === 'linkedRecord' || valIsIdArray;
+        const valIsLinkedObject = !!parsedVal
+          && typeof parsedVal === 'object'
+          && !Array.isArray(parsedVal)
+          && Array.isArray((parsedVal as { linked?: unknown }).linked);
+        const isLinkField = fts?.type === 'link' || fts?.type === 'linkedRecord' || valIsIdArray || valIsLinkedObject;
 
-        // Infer linked table(s) from resolver when no explicit schema definition exists.
-        // A link field may now reference multiple source tables.
+        // Normalized short IDs from any storage shape — used for chip rendering
+        // and for seeding the picker so existence checks line up.
+        const linkIds = isLinkField ? extractLinkIds(parsedVal) : [];
+
+        // Infer linked table(s) from resolver / target paths when no explicit
+        // schema definition exists. A link field may reference multiple tables.
         const effectiveLinkedTables: string[] = (() => {
           const out = new Set<string>();
           if (Array.isArray(fts?.linkedTables)) for (const t of fts.linkedTables) if (t) out.add(t);
           if (fts?.linkedTable) out.add(fts.linkedTable);
-          if (out.size === 0 && valIsIdArray && Array.isArray(parsedVal)) {
-            for (const id of parsedVal) {
-              if (typeof id !== 'string') continue;
+          if (out.size === 0) {
+            // Targets carried in `{ linked: ["at.app.tbl.rec", ...] }` give us
+            // the linked table scope directly — strip the record id segment.
+            for (const target of extractLinkTargets(parsedVal)) {
+              const scope = target.split('.').slice(0, -1).join('.');
+              if (scope) out.add(scope);
+            }
+            // Otherwise fall back to the id resolver for plain id arrays.
+            for (const id of linkIds) {
               const resolved = resolver.resolve(id);
               if (resolved) out.add(resolved.target.split('.').slice(0, -1).join('.'));
             }
@@ -477,7 +515,7 @@ export function FigureFields({ figure, onNavigate, profileFields, recordTs, allE
                           setOpenLinkPicker(key);
                       }}
                     >
-                      {Array.isArray(parsedVal) && (parsedVal as string[]).map((id: string) => {
+                      {linkIds.map((id: string) => {
                         const resolved = resolver.resolve(id);
                         const chipTitle = resolved?.name ? `${id} ${resolved.name}` : id;
                         return (
@@ -516,7 +554,7 @@ export function FigureFields({ figure, onNavigate, profileFields, recordTs, allE
                               <span
                                 onClick={e => {
                                   e.stopPropagation();
-                                  if (Array.isArray(parsedVal)) handleLinkRemove(key, id, parsedVal as string[]);
+                                  handleLinkRemove(key, id, linkIds);
                                 }}
                                 style={{
                                   marginLeft: 2,
@@ -566,18 +604,9 @@ export function FigureFields({ figure, onNavigate, profileFields, recordTs, allE
                     <LinkFieldPicker
                       fieldKey={key}
                       linkedTables={effectiveLinkedTables}
-                      currentIds={Array.isArray(parsedVal) ? parsedVal as string[] : []}
+                      currentIds={linkIds}
                       onClose={() => setOpenLinkPicker(null)}
-                      onChange={async (updatedIds) => {
-                        await dispatch({
-                          op: 'DEF',
-                          target: figure.target,
-                          operand: { [key]: updatedIds },
-                          agent: 'user',
-                          ts: new Date().toISOString(),
-                          acquired_ts: new Date().toISOString(),
-                        });
-                      }}
+                      onChange={(updatedIds) => { dispatchLinkUpdate(key, updatedIds); }}
                     />
                   )}
                 </div>
