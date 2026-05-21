@@ -1451,6 +1451,25 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
   const deletedSpaceCount = getDeletedSpaces().length;
   const archivedSpaceCount = getArchivedSpaces().length;
 
+  // Amino single-tenant rescue: the deployment hosts exactly one canonical
+  // space, but a stale `eo-selected-space` localStorage value (or a hand-typed
+  // URL like `space_amino_2`) can route the app to a phantom target that has
+  // no Matrix room behind it. Once discovery resolves the canonical entry,
+  // redirect there so the OPFS worker initializes against the real space and
+  // sync can populate the local cache. View/scope are preserved so the user
+  // stays on whatever screen they were trying to reach.
+  useEffect(() => {
+    if (!isAmino) return;
+    if (!selectedSpace) return;
+    if (activeEntries.length === 0) return;
+    const canonical = activeEntries[0].spaceTarget;
+    if (canonical === selectedSpace) return;
+    console.info('[EO-DB] Amino single-tenant rescue: redirecting', selectedSpace, '→', canonical);
+    setSelectedSpace(canonical);
+    localStorage.setItem('eo-selected-space', canonical);
+    navigate({ space: canonical, scope: null, record: null, builderViewId: null, customPageId: null });
+  }, [isAmino, selectedSpace, activeEntries, navigate]);
+
   // --- Reset stale state when switching spaces ---
   const prevSpaceRef = useRef(selectedSpace);
   useEffect(() => {
@@ -2649,6 +2668,7 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
               entries={activeEntries}
               loading={MATRIX_ENABLED && !matrixReady && activeEntries.length === 0}
               matrixReady={!MATRIX_ENABLED || matrixReady}
+              canCreate={!isAmino}
               activeSpace={selectedSpace}
               onSelect={(target) => {
                 selectSpace(target);
