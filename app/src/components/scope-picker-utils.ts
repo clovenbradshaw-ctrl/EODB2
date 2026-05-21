@@ -135,7 +135,7 @@ export function buildTree(states: EoState[], statePrefix: string): TreeNode[] {
     ? statePrefix.split('.').filter(Boolean).length
     : 0;
 
-  const roots: TreeNode[] = [];
+  let roots: TreeNode[] = [];
   for (const [path] of pathSet) {
     const depth = path.split('.').length;
     if (depth === prefixDepth + 1) {
@@ -143,11 +143,12 @@ export function buildTree(states: EoState[], statePrefix: string): TreeNode[] {
     }
   }
 
-  // If there's exactly one root node, skip down a level and show its children
-  // directly. Since each space has its own isolated IDB, the single root
-  // (typically "spaces") is redundant — the user is already scoped to one space.
-  if (roots.length === 1 && roots[0].children.length > 0) {
-    return roots[0].children;
+  // Skip down through any chain of single-child container levels — they're
+  // redundant context the user is already implicitly scoped to. For the
+  // Airtable case this collapses `at` → `at.{baseId}` so each imported table
+  // surfaces at the top level instead of being nested under the base.
+  while (roots.length === 1 && roots[0].children.length > 0) {
+    roots = roots[0].children;
   }
 
   return roots;
