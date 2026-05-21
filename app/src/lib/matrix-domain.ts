@@ -185,3 +185,10 @@ export function isAminoHomeserver(homeserver: string | undefined | null): boolea
     return false;
   }
 }
+
+/**
+ * The single shared room used by every Amino client. The app is one-room
+ * by design (CLAUDE.md: "One shared Matrix space serves all users"), so
+ * room resolution is a constant rather than a discovery walk.
+ */
+export const AMINO_ROOM_ID = '!GkzzxzJwlVLdBBQkqZ:app.aminoimmigration.com';

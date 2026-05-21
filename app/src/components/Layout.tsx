@@ -45,7 +45,7 @@ import {
 } from '../crypto/key-delivery';
 import { useAirtableStore } from '../ingestion/airtable-store';
 import { resolveDataRoom } from '../matrix/event-bridge';
-import { configureMatrixDomain, isAminoHomeserver } from '../lib/matrix-domain';
+import { configureMatrixDomain, isAminoHomeserver, AMINO_ROOM_ID } from '../lib/matrix-domain';
 import { HolonNav } from './HolonNav';
 import { TableView } from './TableView';
 import { SliceTabs } from './SliceTabs';
@@ -1548,50 +1548,31 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
         return cached.mainRoomId;
       }
 
-      // Single-room fast path: this app uses exactly one space room per
-      // homeserver. Scan joined rooms for any com.eo-db.space.config; if
-      // found, use it. If state events haven't loaded yet, wait one sync
-      // cycle and retry. Avoids the slow multi-tenant discovery gauntlet
-      // (auto-join invites loop, publicRooms peek, canonical-alias lookup)
-      // that can hang for minutes on a homeserver with many rooms.
+      // Single-room hardcode: this app uses exactly one shared Matrix room
+      // for every Amino client (CLAUDE.md: "One shared Matrix space serves
+      // all users"). Skip discovery entirely — just return the constant.
+      // If the user isn't joined yet (new device, fresh install), attempt
+      // to join with a short timeout so we don't block the UI on a stuck
+      // homeserver. joinRoom is idempotent for already-joined rooms.
       if (isAmino && matrixClientRef.current) {
         const client = matrixClientRef.current;
-        console.log('[EO-DB] resolveRoom: single-room scan');
-        let scan = findSpaceRoomByDirectScan(client, null);
-        if (!scan && matrixReadyRef.current) {
-          console.log('[EO-DB] resolveRoom: scan empty, waiting one sync cycle');
-          await new Promise<void>((resolve) => {
-            const timeout = setTimeout(() => {
-              client.removeListener('sync' as any, onNextSync);
-              resolve();
-            }, 5000);
-            const onNextSync = (state: string) => {
-              if (state === 'SYNCING') {
-                client.removeListener('sync' as any, onNextSync);
-                clearTimeout(timeout);
-                resolve();
-              }
-            };
-            client.on('sync' as any, onNextSync);
-          });
-          scan = findSpaceRoomByDirectScan(client, null);
+        const room = client.getRoom(AMINO_ROOM_ID);
+        const membership = room?.getMyMembership?.();
+        if (membership !== 'join') {
+          console.log('[EO-DB] resolveRoom: joining hardcoded room', AMINO_ROOM_ID, '(was:', membership ?? 'unknown', ')');
+          try {
+            await Promise.race([
+              (client as any).joinRoom(AMINO_ROOM_ID),
+              new Promise((_, rej) => setTimeout(() => rej(new Error('join timeout')), 10_000)),
+            ]);
+          } catch (e) {
+            console.warn('[EO-DB] resolveRoom: join failed (continuing — sync may catch up):', e);
+          }
+        } else {
+          console.log('[EO-DB] resolveRoom: using hardcoded room', AMINO_ROOM_ID);
         }
-        if (scan) {
-          console.log('[EO-DB] resolveRoom: found', scan.mainRoomId);
-          resolvedSpaceRooms = scan.rooms;
-          return scan.mainRoomId;
-        }
-        console.log('[EO-DB] resolveRoom: no room found, creating');
-        const result = await createSpaceRoom(client, 'Amino', session.userId);
-        if (result) {
-          resolvedSpaceRooms = {
-            main: result.mainRoomId,
-            ...(result.governanceRoomId ? { governance: result.governanceRoomId } : {}),
-          };
-          return result.mainRoomId;
-        }
-        console.warn('[EO-DB] resolveRoom: create failed');
-        return null;
+        resolvedSpaceRooms = { main: AMINO_ROOM_ID };
+        return AMINO_ROOM_ID;
       }
 
       // 0b. Auto-join any invited rooms so their full state becomes readable.
