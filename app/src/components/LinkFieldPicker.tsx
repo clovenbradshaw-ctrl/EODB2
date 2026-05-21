@@ -17,6 +17,7 @@ import { useTheme } from '../theme';
 import type { EoState } from '../db/types';
 import { isDeleted } from '../db/tombstone';
 import { formatName } from './scope-picker-utils';
+import { extractLinkIds } from './link-utils';
 import { X, MagnifyingGlass } from '@phosphor-icons/react';
 
 export interface LinkFieldPickerProps {
@@ -28,11 +29,15 @@ export interface LinkFieldPickerProps {
    * compatibility with legacy single-table link fields.
    */
   linkedTables: string[] | string;
-  /** Currently linked record IDs, e.g. ["EVT-089", "EVT-010"]. */
-  currentIds: string[];
+  /**
+   * Currently linked record IDs. Accepts short IDs (e.g. "EVT-089"), full
+   * target paths (e.g. "at.appA.tblB.rec001"), or a raw value pulled
+   * straight from state — extractLinkIds normalizes them to short IDs.
+   */
+  currentIds: string[] | unknown;
   /** Called when the picker should close. */
   onClose: () => void;
-  /** Called with the updated ID array after add/remove. */
+  /** Called with the updated array of short IDs after add/remove. */
   onChange: (updatedIds: string[]) => void;
 }
 
@@ -57,6 +62,10 @@ export function LinkFieldPicker({ fieldKey, linkedTables, currentIds, onClose, o
   void fieldKey; // used by caller for dispatch context
   const { theme: t } = useTheme();
   const getStateByPrefix = useEoStore(s => s.getStateByPrefix);
+
+  // Accept any input shape (short IDs, full target paths, { linked: [...] }
+  // objects, JSON strings) and reduce to short IDs for comparison/dispatch.
+  const normalizedIds = useMemo(() => extractLinkIds(currentIds), [currentIds]);
 
   const tables = useMemo(() => {
     const arr = Array.isArray(linkedTables) ? linkedTables : [linkedTables];
@@ -110,13 +119,13 @@ export function LinkFieldPicker({ fieldKey, linkedTables, currentIds, onClose, o
     return out;
   }, [records, search, tableFilter]);
 
-  const currentSet = useMemo(() => new Set(currentIds), [currentIds]);
+  const currentSet = useMemo(() => new Set(normalizedIds), [normalizedIds]);
 
   function toggle(id: string) {
     if (currentSet.has(id)) {
-      onChange(currentIds.filter(x => x !== id));
+      onChange(normalizedIds.filter(x => x !== id));
     } else {
-      onChange([...currentIds, id]);
+      onChange([...normalizedIds, id]);
     }
   }
 
@@ -243,7 +252,7 @@ export function LinkFieldPicker({ fieldKey, linkedTables, currentIds, onClose, o
         )}
 
         {/* Currently linked chips */}
-        {currentIds.length > 0 && (
+        {normalizedIds.length > 0 && (
           <div style={{
             padding: '8px 12px',
             borderBottom: `1px solid ${t.borderLight}`,
@@ -251,7 +260,7 @@ export function LinkFieldPicker({ fieldKey, linkedTables, currentIds, onClose, o
             flexWrap: 'wrap',
             gap: 4,
           }}>
-            {currentIds.map(id => {
+            {normalizedIds.map(id => {
               const rec = records.find(r => r.id === id);
               const name = rec ? rec.name : id;
               return (
