@@ -1548,6 +1548,51 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
         return cached.mainRoomId;
       }
 
+      // Single-room fast path: this app uses exactly one space room per
+      // homeserver. Scan joined rooms for any com.eo-db.space.config; if
+      // found, use it. If state events haven't loaded yet, wait one sync
+      // cycle and retry. Avoids the slow multi-tenant discovery gauntlet
+      // (auto-join invites loop, publicRooms peek, canonical-alias lookup)
+      // that can hang for minutes on a homeserver with many rooms.
+      if (isAmino && matrixClientRef.current) {
+        const client = matrixClientRef.current;
+        console.log('[EO-DB] resolveRoom: single-room scan');
+        let scan = findSpaceRoomByDirectScan(client, null);
+        if (!scan && matrixReadyRef.current) {
+          console.log('[EO-DB] resolveRoom: scan empty, waiting one sync cycle');
+          await new Promise<void>((resolve) => {
+            const timeout = setTimeout(() => {
+              client.removeListener('sync' as any, onNextSync);
+              resolve();
+            }, 5000);
+            const onNextSync = (state: string) => {
+              if (state === 'SYNCING') {
+                client.removeListener('sync' as any, onNextSync);
+                clearTimeout(timeout);
+                resolve();
+              }
+            };
+            client.on('sync' as any, onNextSync);
+          });
+          scan = findSpaceRoomByDirectScan(client, null);
+        }
+        if (scan) {
+          console.log('[EO-DB] resolveRoom: found', scan.mainRoomId);
+          resolvedSpaceRooms = scan.rooms;
+          return scan.mainRoomId;
+        }
+        console.log('[EO-DB] resolveRoom: no room found, creating');
+        const result = await createSpaceRoom(client, 'Amino', session.userId);
+        if (result) {
+          resolvedSpaceRooms = {
+            main: result.mainRoomId,
+            ...(result.governanceRoomId ? { governance: result.governanceRoomId } : {}),
+          };
+          return result.mainRoomId;
+        }
+        console.warn('[EO-DB] resolveRoom: create failed');
+        return null;
+      }
 
       // 0b. Auto-join any invited rooms so their full state becomes readable.
       //     Invites received since initial sync may still be pending.
