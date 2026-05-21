@@ -67,6 +67,7 @@ import { createHydrationBundleDrive } from '../ingestion/airtable-hydration-bund
 import { loadSpaceKeyring } from '../crypto/keyring-store';
 import { isAminoHomeserver } from '../lib/matrix-domain';
 import { useTheme, type Theme } from '../theme';
+import { notifySync } from './SyncToast';
 
 // ─── Types ──────────────────────────────────────────────────────────────────
 
@@ -803,6 +804,12 @@ export function AirtableSettingsSection({
           : 'Working...';
         setSyncStatus((prev) => ({ ...prev, [statusKey]: { state: 'syncing', message: msg } }));
 
+        // Surface per-table completions as toasts so the user has a visible
+        // signal that records are landing during a long bulk import.
+        if (p.phase === 'table_done' && (p.ingested ?? 0) > 0) {
+          notifySync.info(`Imported ${p.ingested} record${p.ingested === 1 ? '' : 's'} from ${p.table ?? 'table'}`);
+        }
+
         // … and the global live snapshot so the header badge + status card
         // see the same information as the continuous service.
         const prev = useAirtableStore.getState().currentSync;
@@ -935,6 +942,14 @@ export function AirtableSettingsSection({
       const overwritten = result.total_records_overwritten;
       const skipped = result.total_records_skipped;
       const duration = `${(result.duration_ms / 1000).toFixed(1)}s`;
+
+      // Final summary toast — the per-table toasts above tell the user
+      // records are landing; this one closes the loop with the total. Note
+      // these events land in the local OPFS log first; Matrix durability
+      // happens lazily via the block sealer.
+      if (ingested > 0) {
+        notifySync.info(`Airtable sync complete — ${ingested} record${ingested === 1 ? '' : 's'} in local cache`);
+      }
 
       useAirtableStore.getState().setLastSyncResult(result);
       useAirtableStore.getState().setLastSyncAt(new Date().toISOString());

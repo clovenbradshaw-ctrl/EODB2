@@ -1,61 +1,139 @@
 /**
  * SyncToast — brief confirmation when events sync to Matrix (or fail to).
  *
- * Shows a small, auto-dismissing pill at the bottom of the screen.
- * Driven by the SyncManager.onSyncStatus callback.
+ * A single pill at the bottom of the screen, auto-dismissed after a few
+ * seconds. Driven by a module-level notifier so any layer (PeerSync,
+ * Airtable, hydration, ...) can publish a status without prop-drilling.
+ *
+ * Aggregation: 'confirmed' calls are throttled and counted. A burst of
+ * edits produces a single "Synced to Matrix (12)" pill rather than 12
+ * separate toasts — important for bulk operations.
  */
 
-import { useState, useEffect, useCallback, useRef } from 'react';
+import { useEffect, useState } from 'react';
 import { useTheme } from '../theme';
 
-export type SyncToastStatus = 'confirmed' | 'queued' | 'rate-limited' | null;
+export type SyncToastStatus = 'confirmed' | 'queued' | 'rate-limited' | 'info';
 
-interface SyncToastProps {
-  /** The latest sync status. Changes (including same-value) re-trigger the toast. */
+interface ToastEntry {
   status: SyncToastStatus;
-  /** Incrementing key to re-trigger even when status stays the same. */
+  label: string;
+  /** Monotonic counter — bumped on every publish so a repeat status still
+   *  re-triggers the React effect. */
   seq: number;
 }
 
 const DISPLAY_MS = 2500;
+const CONFIRM_THROTTLE_MS = 2500;
 
-export function SyncToast({ status, seq }: SyncToastProps) {
+let currentEntry: ToastEntry | null = null;
+let nextSeq = 0;
+const listeners = new Set<(entry: ToastEntry | null) => void>();
+
+function emit(next: ToastEntry | null): void {
+  currentEntry = next;
+  for (const l of listeners) l(next);
+}
+
+function publish(status: SyncToastStatus, label: string): void {
+  nextSeq += 1;
+  emit({ status, label, seq: nextSeq });
+}
+
+// ── Confirmed aggregation ────────────────────────────────────────────────────
+// Throttle: the first 'confirmed' in a quiet period fires immediately so the
+// user sees instant feedback. Subsequent confirms within the window are
+// accumulated; at the end of the window we emit one toast with the count and
+// re-arm if more arrived. Continuous bulk activity (e.g. Airtable hydration)
+// therefore produces ~one pill every CONFIRM_THROTTLE_MS rather than one per
+// event.
+let pendingConfirms = 0;
+let throttleActive = false;
+
+function flushConfirms(): void {
+  if (pendingConfirms === 0) {
+    throttleActive = false;
+    return;
+  }
+  const count = pendingConfirms;
+  pendingConfirms = 0;
+  publish(
+    'confirmed',
+    count > 1 ? `Synced to Matrix (${count})` : 'Synced to Matrix',
+  );
+  setTimeout(flushConfirms, CONFIRM_THROTTLE_MS);
+}
+
+function notifyConfirmed(): void {
+  if (!throttleActive) {
+    pendingConfirms = 0;
+    throttleActive = true;
+    publish('confirmed', 'Synced to Matrix');
+    setTimeout(flushConfirms, CONFIRM_THROTTLE_MS);
+    return;
+  }
+  pendingConfirms += 1;
+}
+
+/**
+ * Module-level notifier — call from anywhere (PeerSync, Airtable, etc.)
+ * without prop-drilling React state.
+ */
+export const notifySync = {
+  confirmed: notifyConfirmed,
+  queued: () => publish('queued', 'Queued locally (offline)'),
+  rateLimited: () => publish('rate-limited', 'Rate limited — retrying...'),
+  info: (label: string) => publish('info', label),
+};
+
+// ── React component ─────────────────────────────────────────────────────────
+
+export function SyncToast() {
   const { theme } = useTheme();
-  const [visible, setVisible] = useState(false);
-  const [current, setCurrent] = useState<SyncToastStatus>(null);
-  const timerRef = useRef<ReturnType<typeof setTimeout>>();
+  const [entry, setEntry] = useState<ToastEntry | null>(currentEntry);
 
   useEffect(() => {
-    if (!status) return;
-    setCurrent(status);
-    setVisible(true);
-    clearTimeout(timerRef.current);
-    timerRef.current = setTimeout(() => setVisible(false), DISPLAY_MS);
-    return () => clearTimeout(timerRef.current);
-  }, [status, seq]);
+    const onChange = (next: ToastEntry | null) => setEntry(next);
+    listeners.add(onChange);
+    return () => { listeners.delete(onChange); };
+  }, []);
 
-  if (!visible || !current) return null;
+  useEffect(() => {
+    if (!entry) return;
+    const seqAtMount = entry.seq;
+    const timer = setTimeout(() => {
+      // Only clear if a newer entry hasn't arrived in the meantime — a fresh
+      // publish bumps `currentEntry.seq` and gets its own dismiss timer.
+      if (currentEntry?.seq === seqAtMount) emit(null);
+    }, DISPLAY_MS);
+    return () => clearTimeout(timer);
+  }, [entry?.seq]);
 
-  const config = {
+  if (!entry) return null;
+
+  const palette: Record<SyncToastStatus, { bg: string; border: string; color: string }> = {
     confirmed: {
       bg: theme.successBg,
       border: theme.successBorder,
       color: theme.successText ?? theme.success,
-      label: 'Synced to Matrix',
     },
     queued: {
       bg: theme.warningBg,
       border: theme.warningBorder,
       color: theme.warningText ?? theme.warning,
-      label: 'Queued locally (offline)',
     },
     'rate-limited': {
       bg: theme.dangerBg,
       border: theme.dangerBorder,
       color: theme.dangerText ?? theme.danger,
-      label: 'Rate limited — retrying...',
     },
-  }[current];
+    info: {
+      bg: theme.accentBg,
+      border: theme.accent,
+      color: theme.accent,
+    },
+  };
+  const cfg = palette[entry.status];
 
   return (
     <div
@@ -68,9 +146,9 @@ export function SyncToast({ status, seq }: SyncToastProps) {
         transform: 'translateX(-50%)',
         padding: '8px 16px',
         borderRadius: 8,
-        border: `1px solid ${config.border}`,
-        background: config.bg,
-        color: config.color,
+        border: `1px solid ${cfg.border}`,
+        background: cfg.bg,
+        color: cfg.color,
         fontSize: 12,
         fontWeight: 500,
         fontFamily: "'JetBrains Mono', monospace",
@@ -79,24 +157,7 @@ export function SyncToast({ status, seq }: SyncToastProps) {
         boxShadow: '0 2px 8px rgba(0,0,0,0.15)',
       }}
     >
-      {config.label}
+      {entry.label}
     </div>
   );
-}
-
-/**
- * Hook to track the latest sync status for use with SyncToast.
- * Returns [status, seq, onSyncStatus].
- *
- * Pass `onSyncStatus` to SyncManager.onSyncStatus.
- * Pass `status` and `seq` to <SyncToast>.
- */
-export function useSyncToast(): [SyncToastStatus, number, (status: 'confirmed' | 'queued' | 'rate-limited') => void] {
-  const [entry, setEntry] = useState<{ status: SyncToastStatus; seq: number }>({ status: null, seq: 0 });
-
-  const onStatus = useCallback((s: 'confirmed' | 'queued' | 'rate-limited') => {
-    setEntry((prev) => ({ status: s, seq: prev.seq + 1 }));
-  }, []);
-
-  return [entry.status, entry.seq, onStatus];
 }

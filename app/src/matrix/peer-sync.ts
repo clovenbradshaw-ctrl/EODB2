@@ -70,6 +70,11 @@ export class PeerSync {
   /** Periodic heartbeat timer — re-announces presence so late-joining peers can sync. */
   private heartbeatTimer: ReturnType<typeof setInterval> | null = null;
 
+  /** Optional listener for per-event Matrix-durability outcomes. Drives the
+   *  toast surface — 'confirmed' fires once the homeserver accepts the send,
+   *  'queued' fires when sendEoEvent throws and we park in the offline queue. */
+  private onSyncStatus?: (status: 'confirmed' | 'queued') => void;
+
   /** `window` online-event handler — flushes the offline queue on reconnect. */
   private onlineHandler?: () => void;
 
@@ -152,6 +157,11 @@ export class PeerSync {
   /** Attach a WebRTC peer instance for transport upgrades. */
   setWebRTCPeer(peer: WebRTCPeer): void {
     this.webrtcPeer = peer;
+  }
+
+  /** Attach a listener for per-event Matrix-durability outcomes. */
+  setOnSyncStatus(cb: (status: 'confirmed' | 'queued') => void): void {
+    this.onSyncStatus = cb;
   }
 
   /**
@@ -571,10 +581,12 @@ export class PeerSync {
     // layer; it does not make an event canonical.)
     try {
       await sendEoEvent(this.client, this.roomId, event);
+      this.onSyncStatus?.('confirmed');
     } catch {
       await enqueueOfflineEvent(this.roomId, event).catch((e) => {
         console.warn('[EO-DB] PeerSync: failed to queue offline event:', e);
       });
+      this.onSyncStatus?.('queued');
     }
 
     const room = this.client.getRoom(this.roomId);

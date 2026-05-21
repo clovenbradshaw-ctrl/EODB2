@@ -55,7 +55,7 @@ import { RecordView } from './RecordView';
 import { useIsMobile, useIsTablet, useIsNarrow } from '../hooks/useIsMobile';
 import { formatName } from './scope-picker-utils';
 import { ConnectionStatus, useConnectionState, type ConnectionState } from './ConnectionStatus';
-import { SyncToast, useSyncToast } from './SyncToast';
+import { SyncToast, notifySync } from './SyncToast';
 import { AirtableSyncBadge } from './AirtableSyncBadge';
 import { ErrorBoundary } from './ErrorBoundary';
 import { PressureBadge } from './PressureBadge';
@@ -657,7 +657,6 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
   const getState = useEoStore((s) => s.getState);
   const _browserOnline = useConnectionState(); // triggers re-render on network change
   const syncManager = useEoStore((s) => s.syncManager);
-  const [syncToastStatus, syncToastSeq, onSyncStatus] = useSyncToast();
   const [matrixReady, setMatrixReady] = useState(false);
   // Ref mirror of matrixReady so async code inside setupSpaceStore can branch
   // on the latest value without making matrixReady a dependency of the effect
@@ -1888,6 +1887,7 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
               (events) => useEoStore.getState().batchImport(events),
             );
             ps.setWebRTCPeer(wrtc);
+            ps.setOnSyncStatus((s) => s === 'confirmed' ? notifySync.confirmed() : notifySync.queued());
             await ps.start();
             if (!isStale()) {
               existing.peerSync = ps;
@@ -2101,6 +2101,7 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
               psChainSeg,
             );
             peerSync.setWebRTCPeer(webrtcPeer);
+            peerSync.setOnSyncStatus((s) => s === 'confirmed' ? notifySync.confirmed() : notifySync.queued());
             await peerSync.start();
             if (isStale()) { peerSync.stop(); webrtcPeer.stop(); return; }
             useEoStore.getState().setSyncManager(peerSync as any);
@@ -2248,6 +2249,7 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
           psChainSeg,
         );
         ps.setWebRTCPeer(wrtc);
+        ps.setOnSyncStatus((s) => s === 'confirmed' ? notifySync.confirmed() : notifySync.queued());
         await ps.start();
         if (cancelled) { ps.stop(); wrtc.stop(); return; }
         cached.peerSync = ps;
@@ -2885,7 +2887,7 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
               Loading data{lastSeq > 0 ? ` (${lastSeq})` : ''}…
             </div>
           )}
-          {!isMobile && <SyncToast status={syncToastStatus} seq={syncToastSeq} />}
+          {!isMobile && <SyncToast />}
           {!isMobile && isAmino && <AirtableSyncBadge />}
           {selectedSpace && !isMobile && (
             <PermissionBadge role={currentRole} displayName={displayName} />
