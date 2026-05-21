@@ -697,6 +697,16 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
     const timer = setTimeout(() => setShowStoreLoading(true), 400);
     return () => clearTimeout(timer);
   }, [ready]);
+  // Init progress surfaced from setupSpaceStore. `expectedTotal` is read
+  // from the room's com.eo-db.stats state event so we can render
+  // "X / N events" while the chain hydrate is downloading. `phase`
+  // describes what setupSpaceStore is currently doing.
+  const [initPhase, setInitPhase] = useState<string>('Loading local data');
+  const [expectedTotal, setExpectedTotal] = useState<number | null>(null);
+  const [hydrateProgress, setHydrateProgress] = useState<{
+    blockCount?: number;
+    eventCount?: number;
+  } | null>(null);
   const retrySync = useCallback(() => {
     setConnectionError(null);
     setConnectionDetail(null);
@@ -1879,6 +1889,13 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
           const hydrateClient = matrixClientRef.current;
           const hydrateStore = useEoStore.getState().store;
           if (hydrateStore) {
+            // Read the room's totals so the UI can show "X / N events"
+            // as a denominator during hydration. Missing stats event (older
+            // deployment) just leaves the total null — UI falls back to
+            // showing current count only.
+            const stats = readRoomStats(hydrateClient, spaceRoomId);
+            if (stats) setExpectedTotal(stats.totalEvents);
+
             // Reconcile the snapshot's hydration cursor with localStorage
             // before triggering hydrateBlocksIfStale. If localStorage was
             // cleared but the snapshot recorded the cursor, restore it so
@@ -1889,10 +1906,24 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
               setPersistedHydratedHead(spaceRoomId, snapHead);
             }
             const mirror = buildBlockMirror(hydrateClient, spaceRoomId);
+            setInitPhase('Downloading from Matrix');
             useEoStore.getState().runChainHydrate(() =>
               hydrateBlocksIfStale(hydrateClient, spaceRoomId, hydrateStore, {
                 bulkApply: (events) => useEoStore.getState().batchImport(events),
                 mirror,
+                onProgress: (p) => {
+                  if (isStale()) return;
+                  if (p.phase === 'head') setInitPhase('Checking chain head');
+                  else if (p.phase === 'chain') setInitPhase('Walking block chain');
+                  else if (p.phase === 'download') setInitPhase('Downloading blocks');
+                  else if (p.phase === 'apply') setInitPhase('Applying blocks');
+                  else if (p.phase === 'tail') setInitPhase('Catching up tail');
+                  else if (p.phase === 'done') setInitPhase('Sync complete');
+                  setHydrateProgress({
+                    blockCount: p.blockCount,
+                    eventCount: p.eventCount,
+                  });
+                },
               }),
             )
               .then((r) => {
@@ -2134,11 +2165,26 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
             // closure, replacing the Layout-side initial hydrate call.
             // listenForChainUpdates (wired earlier in this effect) still
             // handles subsequent updates from other clients.
+            const stats = readRoomStats(psClient, spaceRoomId);
+            if (stats) setExpectedTotal(stats.totalEvents);
             const psChainSeg = () =>
               useEoStore.getState().runChainHydrate(() =>
                 hydrateBlocksIfStale(psClient, spaceRoomId, psStore, {
                   bulkApply: (events) => useEoStore.getState().batchImport(events),
                   mirror: psMirror,
+                  onProgress: (p) => {
+                    if (isStale()) return;
+                    if (p.phase === 'head') setInitPhase('Checking chain head');
+                    else if (p.phase === 'chain') setInitPhase('Walking block chain');
+                    else if (p.phase === 'download') setInitPhase('Downloading blocks');
+                    else if (p.phase === 'apply') setInitPhase('Applying blocks');
+                    else if (p.phase === 'tail') setInitPhase('Catching up tail');
+                    else if (p.phase === 'done') setInitPhase('Sync complete');
+                    setHydrateProgress({
+                      blockCount: p.blockCount,
+                      eventCount: p.eventCount,
+                    });
+                  },
                 }).then((r) => {
                   if (r) return useEoStore.getState().flushToOpfs(r.latestBlockEventId);
                 }),
@@ -3075,7 +3121,22 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
           ) : (
             <>
               {showStoreLoading && (
-                <SyncProgress message="Initializing store..." detail="Loading local data..." />
+                <SyncProgress
+                  message={`${initPhase}...`}
+                  detail={(() => {
+                    const current = lastSeq;
+                    const total = expectedTotal;
+                    const block = hydrateProgress?.blockCount;
+                    if (total !== null && total > 0) {
+                      return block !== undefined
+                        ? `${current.toLocaleString()} / ${total.toLocaleString()} events · ${block} blocks`
+                        : `${current.toLocaleString()} / ${total.toLocaleString()} events`;
+                    }
+                    return current > 0
+                      ? `${current.toLocaleString()} events loaded`
+                      : 'Connecting...';
+                  })()}
+                />
               )}
               <HolonNav
                 selectedScope={selectedScope}
