@@ -45,7 +45,8 @@ import {
 } from '../crypto/key-delivery';
 import { useAirtableStore } from '../ingestion/airtable-store';
 import { resolveDataRoom } from '../matrix/event-bridge';
-import { configureMatrixDomain, isAminoHomeserver } from '../lib/matrix-domain';
+import { writeRoomStats, readRoomStats } from '../matrix/room-stats';
+import { configureMatrixDomain, isAminoHomeserver, AMINO_ROOM_ID } from '../lib/matrix-domain';
 import { HolonNav } from './HolonNav';
 import { TableView } from './TableView';
 import { SliceTabs } from './SliceTabs';
@@ -696,6 +697,16 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
     const timer = setTimeout(() => setShowStoreLoading(true), 400);
     return () => clearTimeout(timer);
   }, [ready]);
+  // Init progress surfaced from setupSpaceStore. `expectedTotal` is read
+  // from the room's com.eo-db.stats state event so we can render
+  // "X / N events" while the chain hydrate is downloading. `phase`
+  // describes what setupSpaceStore is currently doing.
+  const [initPhase, setInitPhase] = useState<string>('Loading local data');
+  const [expectedTotal, setExpectedTotal] = useState<number | null>(null);
+  const [hydrateProgress, setHydrateProgress] = useState<{
+    blockCount?: number;
+    eventCount?: number;
+  } | null>(null);
   const retrySync = useCallback(() => {
     setConnectionError(null);
     setConnectionDetail(null);
@@ -1548,6 +1559,32 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
         return cached.mainRoomId;
       }
 
+      // Single-room hardcode: this app uses exactly one shared Matrix room
+      // for every Amino client (CLAUDE.md: "One shared Matrix space serves
+      // all users"). Skip discovery entirely — just return the constant.
+      // If the user isn't joined yet (new device, fresh install), attempt
+      // to join with a short timeout so we don't block the UI on a stuck
+      // homeserver. joinRoom is idempotent for already-joined rooms.
+      if (isAmino && matrixClientRef.current) {
+        const client = matrixClientRef.current;
+        const room = client.getRoom(AMINO_ROOM_ID);
+        const membership = room?.getMyMembership?.();
+        if (membership !== 'join') {
+          console.log('[EO-DB] resolveRoom: joining hardcoded room', AMINO_ROOM_ID, '(was:', membership ?? 'unknown', ')');
+          try {
+            await Promise.race([
+              (client as any).joinRoom(AMINO_ROOM_ID),
+              new Promise((_, rej) => setTimeout(() => rej(new Error('join timeout')), 10_000)),
+            ]);
+          } catch (e) {
+            console.warn('[EO-DB] resolveRoom: join failed (continuing — sync may catch up):', e);
+          }
+        } else {
+          console.log('[EO-DB] resolveRoom: using hardcoded room', AMINO_ROOM_ID);
+        }
+        resolvedSpaceRooms = { main: AMINO_ROOM_ID };
+        return AMINO_ROOM_ID;
+      }
 
       // 0b. Auto-join any invited rooms so their full state becomes readable.
       //     Invites received since initial sync may still be pending.
@@ -1769,6 +1806,50 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
       return roomId;
     }
 
+    // Debounced room-stats writer. Subscribes to `lastSeq` so every path
+    // that advances the log — local dispatch, batchImport, peer sync,
+    // Airtable import — triggers a (best-effort) publish of head seq + ts
+    // to room state. Coalesced over 2 s to avoid hammering the homeserver
+    // during burst writes (Airtable imports cycle through thousands of
+    // events; one state write per burst is plenty).
+    let statsWriteTimer: ReturnType<typeof setTimeout> | null = null;
+    let lastWrittenSeq = -1;
+    const flushStatsSoon = (latestTs: number) => {
+      if (!matrixClientRef.current) return;
+      if (statsWriteTimer) clearTimeout(statsWriteTimer);
+      statsWriteTimer = setTimeout(() => {
+        statsWriteTimer = null;
+        const client = matrixClientRef.current;
+        if (!client) return;
+        const head = useEoStore.getState().lastSeq;
+        if (head === lastWrittenSeq) return;
+        lastWrittenSeq = head;
+        writeRoomStats(client, AMINO_ROOM_ID, {
+          totalEvents: head,
+          lastEventTs: latestTs,
+          updatedAt: Date.now(),
+          updatedBy: session.userId,
+        }).catch((e) => console.warn('[EO-DB] writeRoomStats failed:', e));
+      }, 2000);
+    };
+    const unsubStats = useEoStore.subscribe((state, prev) => {
+      if (state.lastSeq <= prev.lastSeq) return;
+      // Pull the newest event's ts from recentEvents when available; fall
+      // back to "now" if recentEvents was trimmed (e.g. large bulk import).
+      const newest = state.recentEvents[state.recentEvents.length - 1];
+      const ts = typeof newest?.ts === 'string'
+        ? Date.parse(newest.ts)
+        : (typeof newest?.ts === 'number' ? newest.ts : Date.now());
+      flushStatsSoon(ts);
+    });
+    cleanupFns.push(() => {
+      unsubStats();
+      if (statsWriteTimer) {
+        clearTimeout(statsWriteTimer);
+        statsWriteTimer = null;
+      }
+    });
+
     const onFoldEvent = (event: any) => {
       useEoStore.setState((st) => ({
         recentEvents: [...st.recentEvents.slice(-99), event],
@@ -1826,6 +1907,13 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
           const hydrateClient = matrixClientRef.current;
           const hydrateStore = useEoStore.getState().store;
           if (hydrateStore) {
+            // Read the room's totals so the UI can show "X / N events"
+            // as a denominator during hydration. Missing stats event (older
+            // deployment) just leaves the total null — UI falls back to
+            // showing current count only.
+            const stats = readRoomStats(hydrateClient, spaceRoomId);
+            if (stats) setExpectedTotal(stats.totalEvents);
+
             // Reconcile the snapshot's hydration cursor with localStorage
             // before triggering hydrateBlocksIfStale. If localStorage was
             // cleared but the snapshot recorded the cursor, restore it so
@@ -1836,10 +1924,24 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
               setPersistedHydratedHead(spaceRoomId, snapHead);
             }
             const mirror = buildBlockMirror(hydrateClient, spaceRoomId);
+            setInitPhase('Downloading from Matrix');
             useEoStore.getState().runChainHydrate(() =>
               hydrateBlocksIfStale(hydrateClient, spaceRoomId, hydrateStore, {
                 bulkApply: (events) => useEoStore.getState().batchImport(events),
                 mirror,
+                onProgress: (p) => {
+                  if (isStale()) return;
+                  if (p.phase === 'head') setInitPhase('Checking chain head');
+                  else if (p.phase === 'chain') setInitPhase('Walking block chain');
+                  else if (p.phase === 'download') setInitPhase('Downloading blocks');
+                  else if (p.phase === 'apply') setInitPhase('Applying blocks');
+                  else if (p.phase === 'tail') setInitPhase('Catching up tail');
+                  else if (p.phase === 'done') setInitPhase('Sync complete');
+                  setHydrateProgress({
+                    blockCount: p.blockCount,
+                    eventCount: p.eventCount,
+                  });
+                },
               }),
             )
               .then((r) => {
@@ -2081,11 +2183,26 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
             // closure, replacing the Layout-side initial hydrate call.
             // listenForChainUpdates (wired earlier in this effect) still
             // handles subsequent updates from other clients.
+            const stats = readRoomStats(psClient, spaceRoomId);
+            if (stats) setExpectedTotal(stats.totalEvents);
             const psChainSeg = () =>
               useEoStore.getState().runChainHydrate(() =>
                 hydrateBlocksIfStale(psClient, spaceRoomId, psStore, {
                   bulkApply: (events) => useEoStore.getState().batchImport(events),
                   mirror: psMirror,
+                  onProgress: (p) => {
+                    if (isStale()) return;
+                    if (p.phase === 'head') setInitPhase('Checking chain head');
+                    else if (p.phase === 'chain') setInitPhase('Walking block chain');
+                    else if (p.phase === 'download') setInitPhase('Downloading blocks');
+                    else if (p.phase === 'apply') setInitPhase('Applying blocks');
+                    else if (p.phase === 'tail') setInitPhase('Catching up tail');
+                    else if (p.phase === 'done') setInitPhase('Sync complete');
+                    setHydrateProgress({
+                      blockCount: p.blockCount,
+                      eventCount: p.eventCount,
+                    });
+                  },
                 }).then((r) => {
                   if (r) return useEoStore.getState().flushToOpfs(r.latestBlockEventId);
                 }),
@@ -3022,7 +3139,22 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
           ) : (
             <>
               {showStoreLoading && (
-                <SyncProgress message="Initializing store..." detail="Loading local data..." />
+                <SyncProgress
+                  message={`${initPhase}...`}
+                  detail={(() => {
+                    const current = lastSeq;
+                    const total = expectedTotal;
+                    const block = hydrateProgress?.blockCount;
+                    if (total !== null && total > 0) {
+                      return block !== undefined
+                        ? `${current.toLocaleString()} / ${total.toLocaleString()} events · ${block} blocks`
+                        : `${current.toLocaleString()} / ${total.toLocaleString()} events`;
+                    }
+                    return current > 0
+                      ? `${current.toLocaleString()} events loaded`
+                      : 'Connecting...';
+                  })()}
+                />
               )}
               <HolonNav
                 selectedScope={selectedScope}
