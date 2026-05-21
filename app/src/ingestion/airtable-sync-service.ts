@@ -52,6 +52,7 @@ import {
 import { runAirtableSync, SyncBusyError } from './airtable-sync-runner';
 import { airtableSyncEventTypes } from '../lib/matrix-domain';
 import { createImportProgressListener, useEoStore } from '../store/eo-store';
+import { withRetry } from '../matrix/connection-resilience';
 
 // ─── Constants ──────────────────────────────────────────────────────────────
 
@@ -307,7 +308,9 @@ export class AirtableSyncService {
     merged.syncIntervalSec = Math.max(MIN_SYNC_INTERVAL_SEC, Math.min(MAX_SYNC_INTERVAL_SEC, merged.syncIntervalSec));
 
     try {
-      await this.matrixClient.sendStateEvent(this.roomId, EO_AIRTABLE_CONFIG as any, merged, '');
+      await withRetry(() =>
+        this.matrixClient.sendStateEvent(this.roomId, EO_AIRTABLE_CONFIG as any, merged, ''),
+      );
       useAirtableStore.getState().setSyncSettings(merged);
 
       // Restart timer if interval changed
@@ -350,12 +353,14 @@ export class AirtableSyncService {
 
   private async writeCursorToRoom(baseId: string, tableId: string, cursor: string): Promise<void> {
     const stateKey = `${baseId}/${tableId}`;
-    await this.matrixClient.sendStateEvent(this.roomId, EO_AIRTABLE_CURSOR as any, {
-      lastModifiedSeen: cursor,
-      updatedBy: this.agent,
-      device: this.deviceId,
-      updatedAt: new Date().toISOString(),
-    }, stateKey);
+    await withRetry(() =>
+      this.matrixClient.sendStateEvent(this.roomId, EO_AIRTABLE_CURSOR as any, {
+        lastModifiedSeen: cursor,
+        updatedBy: this.agent,
+        device: this.deviceId,
+        updatedAt: new Date().toISOString(),
+      }, stateKey),
+    );
   }
 
   // ─── Primary syncer election ──────────────────────────────────────────────
@@ -419,15 +424,17 @@ export class AirtableSyncService {
 
     // Claim it
     try {
-      await this.matrixClient.sendStateEvent(this.roomId, EO_AIRTABLE_HEAD as any, {
-        syncer: this.agent,
-        device: this.deviceId,
-        syncing: false,
-        last_sync_at: new Date().toISOString(),
-        records_ingested: head?.records_ingested ?? 0,
-        records_skipped: head?.records_skipped ?? 0,
-        hydrated: head?.hydrated ?? false,
-      }, '');
+      await withRetry(() =>
+        this.matrixClient.sendStateEvent(this.roomId, EO_AIRTABLE_HEAD as any, {
+          syncer: this.agent,
+          device: this.deviceId,
+          syncing: false,
+          last_sync_at: new Date().toISOString(),
+          records_ingested: head?.records_ingested ?? 0,
+          records_skipped: head?.records_skipped ?? 0,
+          hydrated: head?.hydrated ?? false,
+        }, ''),
+      );
       useAirtableStore.getState().setPrimarySyncer(true);
       return true;
     } catch (e) {
@@ -441,12 +448,14 @@ export class AirtableSyncService {
     if (!head || head.syncer !== this.agent) return;
 
     try {
-      await this.matrixClient.sendStateEvent(this.roomId, EO_AIRTABLE_HEAD as any, {
-        ...head,
-        syncer: '',
-        device: '',
-        syncing: false,
-      }, '');
+      await withRetry(() =>
+        this.matrixClient.sendStateEvent(this.roomId, EO_AIRTABLE_HEAD as any, {
+          ...head,
+          syncer: '',
+          device: '',
+          syncing: false,
+        }, ''),
+      );
     } catch (e) {
       console.warn('[EO-DB] Failed to release Airtable primary syncer:', e);
     }
@@ -540,10 +549,12 @@ export class AirtableSyncService {
     const headBefore = this.readHead();
     if (headBefore && headBefore.syncer === this.agent) {
       try {
-        await this.matrixClient.sendStateEvent(this.roomId, EO_AIRTABLE_HEAD as any, {
-          ...headBefore,
-          syncing: true,
-        }, '');
+        await withRetry(() =>
+          this.matrixClient.sendStateEvent(this.roomId, EO_AIRTABLE_HEAD as any, {
+            ...headBefore,
+            syncing: true,
+          }, ''),
+        );
       } catch { /* best-effort */ }
     }
 
@@ -758,10 +769,12 @@ export class AirtableSyncService {
       const headAfter = this.readHead();
       if (headAfter && headAfter.syncer === this.agent) {
         try {
-          await this.matrixClient.sendStateEvent(this.roomId, EO_AIRTABLE_HEAD as any, {
-            ...headAfter,
-            syncing: false,
-          }, '');
+          await withRetry(() =>
+            this.matrixClient.sendStateEvent(this.roomId, EO_AIRTABLE_HEAD as any, {
+              ...headAfter,
+              syncing: false,
+            }, ''),
+          );
         } catch { /* best-effort */ }
       }
     } finally {
@@ -922,15 +935,17 @@ export class AirtableSyncService {
 
     // Update head state event (deduplicated, not spam)
     try {
-      await this.matrixClient.sendStateEvent(this.roomId, EO_AIRTABLE_HEAD as any, {
-        syncer: this.agent,
-        device: this.deviceId,
-        syncing: false,
-        last_sync_at: now,
-        records_ingested: result.total_records_ingested,
-        records_skipped: result.total_records_skipped,
-        hydrated: true,
-      }, '');
+      await withRetry(() =>
+        this.matrixClient.sendStateEvent(this.roomId, EO_AIRTABLE_HEAD as any, {
+          syncer: this.agent,
+          device: this.deviceId,
+          syncing: false,
+          last_sync_at: now,
+          records_ingested: result.total_records_ingested,
+          records_skipped: result.total_records_skipped,
+          hydrated: true,
+        }, ''),
+      );
     } catch (e) {
       console.warn('[EO-DB] Failed to update Airtable head state:', e);
     }

@@ -21,6 +21,7 @@
 import type { MatrixClient } from 'matrix-js-sdk';
 import type { EoEventInput } from '../db/types';
 import { sendEoEvent } from '../matrix/event-bridge';
+import { enqueueOfflineEvent } from '../matrix/offline-queue';
 import {
   BLOCK_SCHEMA_VERSION,
   buildBlockBytes,
@@ -46,6 +47,13 @@ export interface PublishResult {
   inlineEventIds: string[];
   /** Block-pointer event id in block mode. Undefined in inline mode. */
   blockEventId?: string;
+  /**
+   * Inline-mode only: number of events whose send exhausted retries and
+   * were parked in the offline queue for later delivery. Zero on the
+   * happy path. Caller-visible so progress UIs can surface "N events
+   * queued for retry" instead of silently misreporting success.
+   */
+  queuedCount?: number;
 }
 
 export interface PublishOptions {
@@ -81,10 +89,33 @@ export async function publishEoEventBatch(
 
   if (mode === 'inline') {
     const inlineEventIds: string[] = [];
+    let queuedCount = 0;
     for (const ev of events) {
-      inlineEventIds.push(await sendEoEvent(client, roomId, ev));
+      try {
+        inlineEventIds.push(await sendEoEvent(client, roomId, ev));
+      } catch (err) {
+        // sendEoEvent already retried under `withRetry`. Reaching here
+        // means the failure is terminal (retries exhausted or a
+        // non-transient 4xx). Park the event in the durable offline
+        // queue so the rest of the batch can still proceed — otherwise
+        // a single rate-limit storm partway through a large import
+        // silently truncates the canonical timeline.
+        await enqueueOfflineEvent(roomId, ev).catch((qe) => {
+          console.warn('[EO-DB] publish-events: failed to enqueue offline event:', qe);
+        });
+        queuedCount += 1;
+        console.warn(
+          `[EO-DB] publish-events: send failed, event queued for retry (client_event_id=${ev.client_event_id}):`,
+          err,
+        );
+      }
     }
-    return { mode: 'inline', eventCount: events.length, inlineEventIds };
+    return {
+      mode: 'inline',
+      eventCount: events.length,
+      inlineEventIds,
+      queuedCount,
+    };
   }
 
   // Spill the batch to the media store as a single sealed block. Note

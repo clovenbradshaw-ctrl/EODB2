@@ -13,14 +13,19 @@
  */
 
 import { openDB, type IDBPDatabase } from 'idb';
-import type { EoEvent } from '../db/types';
+import type { EoEventInput } from '../db/types';
 
 const DB_NAME = 'eo-offline-queue';
 const STORE = 'queue';
 const DB_VERSION = 1;
 
 interface QueueEntry {
-  event: EoEvent;
+  // Stored as EoEventInput rather than EoEvent: the flush path re-sends via
+  // sendEoEvent, which only consumes EoEventInput fields. Accepting the
+  // wider type lets bulk publish paths (publish-events) park events
+  // without manufacturing a synthetic `seq`. EoEvent is structurally
+  // assignable here, so peer-sync's existing callsites are unaffected.
+  event: EoEventInput;
   /** Send attempts so far — kept for diagnostics; never causes a drop. */
   attempts: number;
 }
@@ -48,7 +53,7 @@ function serial<T>(fn: () => Promise<T>): Promise<T> {
 }
 
 /** Park an event that could not be delivered to its room's timeline. */
-export function enqueueOfflineEvent(roomId: string, event: EoEvent): Promise<void> {
+export function enqueueOfflineEvent(roomId: string, event: EoEventInput): Promise<void> {
   return serial(async () => {
     const db = await getDb();
     const queue: QueueEntry[] = (await db.get(STORE, roomId)) ?? [];
@@ -69,7 +74,7 @@ export interface FlushResult {
  */
 export function flushOfflineQueue(
   roomId: string,
-  send: (event: EoEvent) => Promise<void>,
+  send: (event: EoEventInput) => Promise<void>,
 ): Promise<FlushResult> {
   return serial(async () => {
     const db = await getDb();

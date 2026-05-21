@@ -31,6 +31,7 @@ import {
   matrixEventToEo,
   type EncryptedAttachment,
 } from '../matrix/event-bridge';
+import { withRetry } from '../matrix/connection-resilience';
 import { EodbWriter, BufferSink, type CollectionHeader } from '../db/eodb';
 import type { EoEventInput } from '../db/types';
 import { claimEncoding, type EncodingMatrixClient } from './encoding-claim';
@@ -294,7 +295,13 @@ export async function sealBlockFromEvents(
     sealed_at: new Date().toISOString(),
   };
 
-  const sendResult = await client.sendEvent(roomId, EO_BLOCK_TYPE as any, blockBody as any);
+  // Retries on transient 429 / 5xx / network blips. If the block message
+  // post succeeds but the subsequent head advance fails terminally, the
+  // next sealer run sees an orphan block and advances head without
+  // re-uploading (see file-header comment, steps 5–6).
+  const sendResult = await withRetry(() =>
+    client.sendEvent(roomId, EO_BLOCK_TYPE as any, blockBody as any),
+  );
   const newBlockEventId = sendResult.event_id;
 
   // 4. Advance m.eo.head — only after the block message succeeded
@@ -306,7 +313,9 @@ export async function sealBlockFromEvents(
     tail_cutoff_event_id: lastId,
     updated_at: new Date().toISOString(),
   };
-  await client.sendStateEvent(roomId, EO_HEAD_STATE_TYPE as any, newHead as any, '');
+  await withRetry(() =>
+    client.sendStateEvent(roomId, EO_HEAD_STATE_TYPE as any, newHead as any, ''),
+  );
 
   return {
     blockIndex: newBlockIndex,
@@ -368,7 +377,9 @@ export async function sealBlockFromPayload(
     sealed_at: new Date().toISOString(),
   };
 
-  const sendResult = await client.sendEvent(roomId, EO_BLOCK_TYPE as any, blockBody as any);
+  const sendResult = await withRetry(() =>
+    client.sendEvent(roomId, EO_BLOCK_TYPE as any, blockBody as any),
+  );
   const newBlockEventId = sendResult.event_id;
 
   const newHead: HeadState = {
@@ -379,7 +390,9 @@ export async function sealBlockFromPayload(
     tail_cutoff_event_id: head.tail_cutoff_event_id,
     updated_at: new Date().toISOString(),
   };
-  await client.sendStateEvent(roomId, EO_HEAD_STATE_TYPE as any, newHead as any, '');
+  await withRetry(() =>
+    client.sendStateEvent(roomId, EO_HEAD_STATE_TYPE as any, newHead as any, ''),
+  );
 
   return {
     blockIndex: newBlockIndex,
