@@ -45,6 +45,7 @@ import {
 } from '../crypto/key-delivery';
 import { useAirtableStore } from '../ingestion/airtable-store';
 import { resolveDataRoom } from '../matrix/event-bridge';
+import { writeRoomStats, readRoomStats } from '../matrix/room-stats';
 import { configureMatrixDomain, isAminoHomeserver, AMINO_ROOM_ID } from '../lib/matrix-domain';
 import { HolonNav } from './HolonNav';
 import { TableView } from './TableView';
@@ -1776,6 +1777,50 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
       }
       return roomId;
     }
+
+    // Debounced room-stats writer. Subscribes to `lastSeq` so every path
+    // that advances the log — local dispatch, batchImport, peer sync,
+    // Airtable import — triggers a (best-effort) publish of head seq + ts
+    // to room state. Coalesced over 2 s to avoid hammering the homeserver
+    // during burst writes (Airtable imports cycle through thousands of
+    // events; one state write per burst is plenty).
+    let statsWriteTimer: ReturnType<typeof setTimeout> | null = null;
+    let lastWrittenSeq = -1;
+    const flushStatsSoon = (latestTs: number) => {
+      if (!matrixClientRef.current) return;
+      if (statsWriteTimer) clearTimeout(statsWriteTimer);
+      statsWriteTimer = setTimeout(() => {
+        statsWriteTimer = null;
+        const client = matrixClientRef.current;
+        if (!client) return;
+        const head = useEoStore.getState().lastSeq;
+        if (head === lastWrittenSeq) return;
+        lastWrittenSeq = head;
+        writeRoomStats(client, AMINO_ROOM_ID, {
+          totalEvents: head,
+          lastEventTs: latestTs,
+          updatedAt: Date.now(),
+          updatedBy: session.userId,
+        }).catch((e) => console.warn('[EO-DB] writeRoomStats failed:', e));
+      }, 2000);
+    };
+    const unsubStats = useEoStore.subscribe((state, prev) => {
+      if (state.lastSeq <= prev.lastSeq) return;
+      // Pull the newest event's ts from recentEvents when available; fall
+      // back to "now" if recentEvents was trimmed (e.g. large bulk import).
+      const newest = state.recentEvents[state.recentEvents.length - 1];
+      const ts = typeof newest?.ts === 'string'
+        ? Date.parse(newest.ts)
+        : (typeof newest?.ts === 'number' ? newest.ts : Date.now());
+      flushStatsSoon(ts);
+    });
+    cleanupFns.push(() => {
+      unsubStats();
+      if (statsWriteTimer) {
+        clearTimeout(statsWriteTimer);
+        statsWriteTimer = null;
+      }
+    });
 
     const onFoldEvent = (event: any) => {
       useEoStore.setState((st) => ({
