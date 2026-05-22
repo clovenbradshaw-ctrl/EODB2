@@ -48,14 +48,12 @@ const CONFIGURABLE_VIEWS: { id: string; label: string }[] = [
   { id: 'messages', label: 'Messages' },
   { id: 'members', label: 'Members & Roles' },
   { id: 'log', label: 'Log' },
-  { id: 'builder', label: 'Builder' },
   { id: 'settings', label: 'Settings' },
 ];
 
 /** Views that a persona can land on as their home destination. */
 const HOME_VIEW_OPTIONS: { id: PersonaHome['view']; label: string }[] = [
   { id: 'records', label: 'Records' },
-  { id: 'builder', label: 'Builder page' },
   { id: 'graph', label: 'Graph' },
   { id: 'log', label: 'Log' },
   { id: 'messages', label: 'Messages' },
@@ -279,8 +277,6 @@ export function UserTypeManager({
       const next: PersonaHome = { ...current, ...patch };
       // Normalize: trim empty strings to undefined so serialized state stays clean
       if (!next.scope) delete next.scope;
-      if (!next.builderViewId) delete next.builderViewId;
-      if (!next.customPageId) delete next.customPageId;
       return { ...t, home: next };
     }));
   }
@@ -866,22 +862,6 @@ export function UserTypeManager({
                         }}
                       />
                     </label>
-                    {(def.home?.view === 'builder' || !def.home) && (
-                      <label style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
-                        <span style={{ fontFamily: mono, fontSize: 9, color: theme.textMuted, minWidth: 50 }}>page id</span>
-                        <input
-                          value={def.home?.builderViewId ?? ''}
-                          onChange={(e) => handleUpdateHome(def.id, { builderViewId: e.target.value })}
-                          placeholder="builder page id (optional)"
-                          style={{
-                            flex: 1, fontFamily: mono, fontSize: 10,
-                            padding: '4px 6px', background: theme.bgCard,
-                            border: `1px solid ${theme.border}`, borderRadius: 4,
-                            color: theme.text, outline: 'none',
-                          }}
-                        />
-                      </label>
-                    )}
                   </div>
                   <div style={{ display: 'flex', gap: 6, marginTop: 8 }}>
                     {def.home && (

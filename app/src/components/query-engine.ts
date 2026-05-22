@@ -6,8 +6,6 @@
  */
 
 import type { EoState } from '../db/types';
-import type { DataBinding } from '../blocks/types';
-import type { FilterRule } from './filter-types';
 
 export type QueryLanguage = 'target' | 'sql' | 'graphql' | 'eo';
 
@@ -886,90 +884,3 @@ export function resolveFieldChain(
   return { records: [], scalars: current as any[] };
 }
 
-// ─── DataBinding Resolution ───────────────────────────────────────────
-
-import {
-  resolveByHierarchy,
-  resolveByDepth,
-  resolveByType,
-} from './scope-picker-utils';
-
-/**
- * Resolve a DataBinding to a set of EoState records.
- *
- * @param binding - The binding configuration
- * @param allStates - All states available
- * @param context - Optional @ context item (from parent section)
- * @returns Resolved records and/or scalar values
- */
-export function resolveBinding(
-  binding: DataBinding,
-  allStates: EoState[],
-  context?: EoState | null,
-): { records: EoState[]; scalars: any[]; error?: string } {
-  switch (binding.mode) {
-    case 'hierarchy': {
-      if (!binding.target) return { records: [], scalars: [], error: 'No target selected' };
-      const records = resolveByHierarchy(allStates, binding.target, binding.depth || 'children');
-      return { records: applyBindingFilters(records, binding.filters), scalars: [] };
-    }
-
-    case 'depth': {
-      if (!binding.level) return { records: [], scalars: [], error: 'No depth level set' };
-      const records = resolveByDepth(allStates, binding.level, binding.root);
-      return { records: applyBindingFilters(records, binding.filters), scalars: [] };
-    }
-
-    case 'type': {
-      if (!binding.typeFilter) return { records: [], scalars: [], error: 'No type selected' };
-      const records = resolveByType(allStates, binding.typeFilter, binding.typeRoot);
-      return { records: applyBindingFilters(records, binding.filters), scalars: [] };
-    }
-
-    case 'connection': {
-      if (!binding.fieldChain) return { records: [], scalars: [], error: 'No field chain specified' };
-      if (!context) return { records: [], scalars: [], error: 'No @ context available' };
-      const result = resolveFieldChain(binding.fieldChain, context, allStates);
-      if (result.error) return result;
-      return { records: applyBindingFilters(result.records, binding.filters), scalars: result.scalars };
-    }
-
-    case 'query': {
-      if (!binding.query) return { records: [], scalars: [], error: 'No query specified' };
-      const lang = binding.queryLang || detectLanguage(binding.query);
-      const result = executeQuery(binding.query, lang, allStates);
-      return { records: applyBindingFilters(result.records, binding.filters), scalars: [], error: result.error };
-    }
-
-    default:
-      return { records: [], scalars: [], error: `Unknown mode: ${binding.mode}` };
-  }
-}
-
-function applyBindingFilters(records: EoState[], filters?: FilterRule[]): EoState[] {
-  if (!filters || filters.length === 0) return records;
-
-  return records.filter(s => {
-    const val = s.value || {};
-    return filters.every(f => {
-      const fieldVal = val[f.field] ?? val.fields?.[f.field];
-      const strVal = String(fieldVal ?? '').toLowerCase();
-      const cmpVal = f.value.toLowerCase();
-      switch (f.operator) {
-        case 'equals': return strVal === cmpVal;
-        case 'not_equals': return strVal !== cmpVal;
-        case 'contains': return strVal.includes(cmpVal);
-        case 'not_contains': return !strVal.includes(cmpVal);
-        case 'starts_with': return strVal.startsWith(cmpVal);
-        case 'ends_with': return strVal.endsWith(cmpVal);
-        case 'is_empty': return !fieldVal || strVal === '';
-        case 'is_not_empty': return fieldVal != null && strVal !== '';
-        case 'gt': return Number(fieldVal) > Number(f.value);
-        case 'lt': return Number(fieldVal) < Number(f.value);
-        case 'gte': return Number(fieldVal) >= Number(f.value);
-        case 'lte': return Number(fieldVal) <= Number(f.value);
-        default: return true;
-      }
-    });
-  });
-}

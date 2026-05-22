@@ -99,19 +99,15 @@ const CalendarView = lazyWithRetry(() => import('./CalendarView').then(m => ({ d
 const SettingsView = lazyWithRetry(() => import('./SettingsView').then(m => ({ default: m.SettingsView })));
 const SpaceMembers = lazyWithRetry(() => import('./SpaceMembers').then(m => ({ default: m.SpaceMembers })));
 const ImportView = lazyWithRetry(() => import('./ImportView').then(m => ({ default: m.ImportView })));
-const BuilderView = lazyWithRetry(() => import('./builder/BuilderView').then(m => ({ default: m.BuilderView })));
 const PeopleView = lazyWithRetry(() => import('./PeopleView').then(m => ({ default: m.PeopleView })));
-const RecordPageView = lazyWithRetry(() => import('./builder/RecordPageView').then(m => ({ default: m.RecordPageView })));
 import { PermissionBadge } from './PermissionBadge';
 import { ViewOnlyBanner } from './ViewOnlyBanner';
 import { HeadlineMetrics } from './HeadlineMetrics';
 import { PersonaQuickActions } from './PersonaQuickActions';
 import { useSliceStore } from '../store/slice-store';
-import { useBuilderStore } from '../store/builder-store';
 import { useSyncStore } from '../store/sync-store';
 import { useTheme, spaceBackgroundTint, roleBackgroundTint, type Theme } from '../theme';
 import type { EoState } from '../db/types';
-import type { ViewDefinition } from '../blocks/types';
 import type { SliceType } from './slice-types';
 import { discoverSpacesFromMatrix, discoverPublicSpaces, type SpaceEntry } from '../matrix/space-discovery';
 import { SpaceBrowser } from './SpaceBrowser';
@@ -572,8 +568,6 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
         space: route.space,
         scope: route.scope,
         record: route.record,
-        builderViewId: route.builderViewId,
-        customPageId: route.customPageId,
         query: route.query,
         title: defaultTitleFor(route),
         icon: defaultIconFor(route),
@@ -789,7 +783,7 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
     setSelectedSpace(canonical);
     localStorage.setItem('eo-selected-space', canonical);
     // Clear route state when switching spaces — space is now part of the URL
-    navigate({ space: canonical, scope: null, record: null, view: 'records', builderViewId: null, customPageId: null });
+    navigate({ space: canonical, scope: null, record: null, view: 'records' });
   }
 
   // User-initiated space switch. Shows a confirmation modal warning that
@@ -1467,7 +1461,7 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
     console.info('[EO-DB] Amino single-tenant rescue: redirecting', selectedSpace, '→', canonical);
     setSelectedSpace(canonical);
     localStorage.setItem('eo-selected-space', canonical);
-    navigate({ space: canonical, scope: null, record: null, builderViewId: null, customPageId: null });
+    navigate({ space: canonical, scope: null, record: null });
   }, [isAmino, selectedSpace, activeEntries, navigate]);
 
   // --- Reset stale state when switching spaces ---
@@ -1493,8 +1487,6 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
       setSpaceRoomId(null);
       setSpaceRooms(null);
       setPresence(null);
-      // Reset builder store so old space's views don't persist
-      useBuilderStore.getState().reset();
       // Reset sync store so old space's peer/snapshot data doesn't persist
       useSyncStore.getState().reset();
     }
@@ -2398,7 +2390,6 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
     graph: '\u2B21',    // hexagon
     import: '\u2B07',   // download arrow
     api: '\uD83D\uDD17', // link icon
-    builder: '\u2B1A',  // blocks
     settings: '\u2699', // gear
     messages: '\uD83D\uDCAC', // speech bubble
     people: '\u2689', // people icon
@@ -2460,8 +2451,6 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
         view: home.view,
         scope: home.scope ?? null,
         record: null,
-        builderViewId: home.builderViewId ?? null,
-        customPageId: home.customPageId ?? null,
       });
       return;
     }
@@ -2552,8 +2541,6 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
         run: () => open({ view: 'members', space: selectedSpace }) },
       { id: 'go-log', group: 'Go to', label: 'Event log', icon: 'history',
         run: () => open({ view: 'log', space: selectedSpace }) },
-      { id: 'go-builder', group: 'Go to', label: 'Builder', icon: 'layout',
-        run: () => open({ view: 'builder', space: selectedSpace, builderViewId: null, customPageId: null }) },
       { id: 'go-settings', group: 'Go to', label: 'Settings', icon: 'settings',
         run: () => open({ view: 'settings', space: selectedSpace }) },
     ];
@@ -3080,7 +3067,7 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
               };
             }
             // Configurable views (excludes records/multiuser which are special-cased)
-            const CONFIGURABLE_VIEWS: View[] = ['import', 'people', 'members', 'log', 'builder', 'settings'];
+            const CONFIGURABLE_VIEWS: View[] = ['import', 'people', 'members', 'log', 'settings'];
             const hiddenCount = activeTypeDef?.visible_views
               ? CONFIGURABLE_VIEWS.filter(v => !activeTypeDef.visible_views!.includes(v)).length
               : 0;
@@ -3123,15 +3110,6 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
               >
                 <span style={s.navIcon}>{NAV_ICONS.log}</span>
                 {term('log')}
-              </button>
-            )}
-            {currentPermissions?.can_build_slices !== false && isNavViewVisible('builder') && (
-              <button
-                onClick={() => openRouteAsTab({ view: 'builder', space: selectedSpace, builderViewId: null, customPageId: null }, { reuseByView: true })}
-                style={navItemStyle('builder')}
-              >
-                <span style={s.navIcon}>{NAV_ICONS.builder}</span>
-                Builder
               </button>
             )}
             {currentPermissions?.can_set_governance !== false && isNavViewVisible('settings') && (
@@ -3351,8 +3329,6 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
               <GraphView allStates={allStates} />
             ) : activeView === 'import' ? (
               <ImportView onImportComplete={(scope) => navigate({ view: 'records', scope, record: null })} />
-            ) : activeView === 'builder' ? (
-              <BuilderView />
             ) : activeView === 'people' ? (
               matrixClientRef.current ? (
                 <PeopleView
@@ -3413,7 +3389,6 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
         {selectedRecord && activeView === 'records' && !(detailsPanelCollapsed && !isMobile) && (
           <RecordPageOrDrawer
             recordTarget={selectedRecord}
-            allStates={allStates}
             onClose={() => { navigate({ record: null }); }}
             onNavigate={(t) => { navigate({ record: t }); }}
             onCollapse={!isMobile ? () => setDetailsPanelCollapsed(true) : undefined}
@@ -3512,14 +3487,8 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
   );
 }
 
-/**
- * RecordPageOrDrawer — When a record is selected, check if there's a custom
- * record page view for the record's collection. If yes, render RecordPageView
- * in a drawer. If no, fall back to the default RecordDetailDrawer.
- */
-function RecordPageOrDrawer({ recordTarget, allStates, onClose, onNavigate, onCollapse, profileFields, isMobile, tableRecordTargets, userId }: {
+function RecordPageOrDrawer({ recordTarget, onClose, onNavigate, onCollapse, profileFields, isMobile, tableRecordTargets, userId }: {
   recordTarget: string;
-  allStates: EoState[];
   onClose: () => void;
   onNavigate: (target: string) => void;
   onCollapse?: () => void;
@@ -3528,9 +3497,7 @@ function RecordPageOrDrawer({ recordTarget, allStates, onClose, onNavigate, onCo
   tableRecordTargets?: string[];
   userId?: string;
 }) {
-  const loadView = useBuilderStore((s) => s.loadView);
   const getState = useEoStore((s) => s.getState);
-  const activeUserType = useEoStore((s) => s.activeUserType);
   const [layoutType, setLayoutType] = useState<LayoutDisplayType>('drawer');
 
   // ── Existence check ──────────────────────────────────────────────────────
@@ -3572,99 +3539,8 @@ function RecordPageOrDrawer({ recordTarget, allStates, onClose, onNavigate, onCo
       .catch(() => {});
   }, [recordTarget, getState]);
 
-  // Find a record page view whose recordSource.scope matches this record's parent.
-  // Prefer a view scoped to the current persona (via visibleToTypes) so that
-  // different personas can see different record layouts for the same record.
-  // Views restricted to *other* personas are skipped; views with no restriction
-  // are used as a fallback when no persona-scoped match exists.
-  const recordPageView = useMemo(() => {
-    const parts = recordTarget.split('.');
-    const possibleScopes: string[] = [];
-    for (let i = parts.length - 1; i >= 1; i--) {
-      possibleScopes.push(parts.slice(0, i).join('.'));
-    }
-
-    const viewStates = allStates.filter(s => s.target.startsWith('views.'));
-    type Candidate = { viewId: string; definition: ViewDefinition };
-    let personaMatch: Candidate | null = null;
-    let generalMatch: Candidate | null = null;
-    for (const vs of viewStates) {
-      const def = vs.value as ViewDefinition | null;
-      if (!def || def.pageType !== 'record' || !def.recordSource?.scope) continue;
-      if (!possibleScopes.includes(def.recordSource.scope)) continue;
-      const viewId = vs.target.replace(/^views\./, '');
-      const restriction = def.visibleToTypes;
-      if (!restriction || restriction.length === 0) {
-        if (!generalMatch) generalMatch = { viewId, definition: def };
-        continue;
-      }
-      if (activeUserType && restriction.includes(activeUserType)) {
-        if (!personaMatch) personaMatch = { viewId, definition: def };
-      }
-    }
-    return personaMatch ?? generalMatch;
-  }, [recordTarget, allStates, activeUserType]);
-
-  // Load the record page view into the builder store when found
-  useEffect(() => {
-    if (recordPageView) {
-      loadView(recordPageView.viewId, recordPageView.definition);
-    }
-  }, [recordPageView, loadView]);
-
-  // Don't render anything while we're still checking, or once we've decided
-  // the record is missing (we've already called onClose to clear the route).
   if (existence !== 'exists') return null;
 
-  // If we have a matching record page, render RecordPageView in an inline panel
-  if (recordPageView) {
-    return (
-      <div style={{
-        width: isMobile ? '100vw' : 720, maxWidth: isMobile ? '100vw' : '55vw', height: '100%',
-        flexShrink: 0, borderLeft: isMobile ? 'none' : '1px solid var(--border, #e0e0e0)',
-        background: 'var(--bg, #fff)', display: 'flex', flexDirection: 'column',
-        position: 'relative' as const,
-        ...(isMobile ? { position: 'fixed' as const, inset: 0, zIndex: 1000 } : {}),
-      }}>
-        {onCollapse && !isMobile && (
-          <button
-            onClick={onCollapse}
-            title="Collapse panel (keeps record selected)"
-            aria-label="Collapse panel"
-            style={{
-              position: 'absolute',
-              top: 8,
-              right: 8,
-              zIndex: 2,
-              background: 'var(--bg-card, #fff)',
-              border: '1px solid var(--border, #e0e0e0)',
-              borderRadius: 4,
-              width: 24,
-              height: 24,
-              padding: 0,
-              fontSize: 14,
-              lineHeight: 1,
-              cursor: 'pointer',
-              display: 'flex',
-              alignItems: 'center',
-              justifyContent: 'center',
-            }}
-          >
-            {'\u00BB'}
-          </button>
-        )}
-        <Suspense fallback={null}>
-          <RecordPageView
-            recordTarget={recordTarget}
-            onNavigate={onNavigate}
-            onBack={onClose}
-          />
-        </Suspense>
-      </div>
-    );
-  }
-
-  // Fallback to default drawer
   return (
     <RecordDetailDrawer
       target={recordTarget}
