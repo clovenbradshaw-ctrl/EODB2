@@ -1,845 +1,169 @@
 import { create } from 'zustand';
-import type { EoStore } from '../db/encrypted-store';
-import { createMemoryStore, type MemoryStore } from '../db/memory-store';
+import type { EoEvent, Record_ } from '../db/types';
+import { EO_RECORD_TYPE } from '../db/types';
+import { applyEvent } from '../db/fold';
 import {
-  replayFromLog,
-  processEvent,
-  processEventsBulk,
-  processEventsBulkWithDispatcher,
-} from '../db/fold';
-import { createWorkerShardPool, type WorkerShardPool } from '../db/fold-worker-transport';
-import { horizonGet, type HorizonOpts } from '../db/horizon';
-import { getState, getStateByPrefix, getStateByPrefixPage, type StatePage } from '../db/state';
-import { readLogSince } from '../db/log';
-import {
-  createFoldWorkerClient,
-  initFoldWorker,
-  scanLog,
-  loadKvSnapshot,
-  type FoldWorkerClient,
-} from '../db/lazy-fold';
-import {
-  createPersistenceCoordinator,
-  type PersistenceCoordinator,
-} from '../db/persistence-coordinator';
-import type { EoEvent, EoEventInput, EoState, HorizonResponse } from '../db/types';
-// PeerSync was ripped — the syncManager slot is preserved as a placeholder
-// (e.g. for future REST-based subscription handle) but now opaquely typed.
-type PeerSync = { destroy(): void };
-import type { ResolvedPermissions } from '../permissions/types';
-import type { ManifestState as UserManifest } from '../permissions/space-manifest';
-import { eventHash } from '../db/hash';
-import { pressureMonitor } from '../perf/pressure-monitor';
+  type Session,
+  sendEvent,
+  getMessages,
+  nextTxnId,
+  MatrixError,
+} from '../matrix/rest';
 
-// ─── Shard worker pool (Phase G/H wiring) ──────────────────────────────────
-//
-// A single WorkerShardPool is lazily spawned on the first large bulk import
-// and re-used for the lifetime of the module. The pool is store-agnostic —
-// every ShardRequest carries its own snapshot over the wire, so the same
-// workers can service back-to-back imports across space switches without
-// ever being terminated. `teardown()` tears the pool down alongside the
-// fold worker client for a clean shutdown.
-//
-// `MIN_EVENTS_FOR_WORKER` is the threshold below which the legacy
-// `processEventsBulk` path (single-threaded, in-process) stays faster than
-// spinning up / marshalling across the worker boundary. 500 events lands
-// roughly at the break-even on a 4-core laptop — below that the snapshot
-// serialization + structured-clone overhead dominates the actual fold work.
-// Above it, the worker path wins as soon as `navigator.hardwareConcurrency`
-// is ≥ 2.
-const MIN_EVENTS_FOR_WORKER = 500;
-const MAX_SHARDS = 8;
+/**
+ * The single state slice — events, materialized snapshot, room/session,
+ * and the dispatch + hydrate flow.
+ *
+ * Write path: optimistic → REST PUT → on ack stamp event_id; on failure
+ * surface the error and leave the optimistic event in place (the user can
+ * retry; we don't silently drop).
+ *
+ * Read path: paginate /messages backward from the room head, filter to
+ * EO_RECORD_TYPE events, fold them into `records`.
+ */
 
-let cachedWorkerPool: WorkerShardPool | null = null;
-let cachedPoolShardCount = 0;
+interface EoStore {
+  session: Session | null;
+  roomId: string | null;
 
-/** Return the preferred shard/worker count for the host, or 0 if the
- *  worker path is unavailable (no `Worker` global, hardware says one core,
- *  or running under a test runtime without `navigator`). */
-function preferredShardCount(): number {
-  if (typeof Worker === 'undefined') return 0;
-  const nav: Navigator | undefined =
-    typeof navigator !== 'undefined' ? navigator : undefined;
-  const hc = nav?.hardwareConcurrency;
-  if (typeof hc !== 'number' || hc < 2) return 0;
-  return Math.min(hc, MAX_SHARDS);
+  /** All EO events ever folded, by event_id (or pending key for optimistic). */
+  events: Map<string, EoEvent>;
+  /** Materialized snapshot derived from events. */
+  records: Map<string, Record_>;
+
+  /** Hydration progress. */
+  hydrating: boolean;
+  hydrateError: string | null;
+  /** Whether the initial hydration has completed (true even if 0 events). */
+  hydrated: boolean;
+
+  setSession(s: Session | null): void;
+  setRoom(roomId: string | null): void;
+
+  /** Optimistically apply an event, then PUT it to Matrix. */
+  dispatch(content: Omit<EoEvent, 'event_id' | 'pending' | 'origin_server_ts'>): Promise<void>;
+
+  /** Cold-start hydration: paginate /messages → fold → done. */
+  hydrate(): Promise<void>;
+
+  /** Reset all in-memory state. Used on logout. */
+  reset(): void;
 }
 
-/** Lazy-spawn (and cache) the worker pool at `shardCount` workers. Returns
- *  null if the environment doesn't support workers. */
-function getOrCreateWorkerPool(shardCount: number): WorkerShardPool | null {
-  if (shardCount < 1) return null;
-  if (cachedWorkerPool && cachedPoolShardCount === shardCount) {
-    return cachedWorkerPool;
-  }
-  // If the cached pool exists at a different size, tear it down before
-  // spawning a replacement. In practice `preferredShardCount()` is stable
-  // across a session, so this branch is mostly defensive.
-  if (cachedWorkerPool) {
-    cachedWorkerPool.terminate();
-    cachedWorkerPool = null;
-    cachedPoolShardCount = 0;
-  }
-  try {
-    // Vite's Worker plugin rewrites `new Worker(new URL(..., import.meta.url))`
-    // into a bundle-aware URL at build time; under Vitest / Node, this will
-    // throw synchronously and we fall through to the catch → serial path.
-    const workerFactory = (): Worker =>
-      new Worker(new URL('../workers/fold-shard.worker.ts', import.meta.url), {
-        type: 'module',
-      });
-    const pool = createWorkerShardPool({ workerCount: shardCount, workerFactory });
-    cachedWorkerPool = pool;
-    cachedPoolShardCount = shardCount;
-    return pool;
-  } catch (e) {
-    console.warn('[EO-DB] Failed to spawn shard worker pool, falling back to in-process bulk:', e);
-    return null;
-  }
-}
+export const useEoStore = create<EoStore>((set, get) => ({
+  session: null,
+  roomId: null,
+  events: new Map(),
+  records: new Map(),
+  hydrating: false,
+  hydrateError: null,
+  hydrated: false,
 
-/** Terminate and drop the cached worker pool. Called from `teardown`. */
-function terminateCachedWorkerPool(): void {
-  if (cachedWorkerPool) {
-    cachedWorkerPool.terminate();
-    cachedWorkerPool = null;
-    cachedPoolShardCount = 0;
-  }
-}
+  setSession(s) { set({ session: s }); },
+  setRoom(roomId) { set({ roomId, hydrated: false, events: new Map(), records: new Map() }); },
 
-// ─── Fold-quiescent gate ──────────────────────────────────────────────
-//
-// A snapshot written mid-fold claims a `seq` it hasn't earned: the
-// kv map captured in `entries` lags behind the events still in flight,
-// and on next boot the OPFS log replay re-applies events that the fold
-// engine already half-applied. The fold dedup makes this idempotent for
-// correctness, but the audit trail is broken and the snapshot misreports
-// its own coverage. (V10 of HELIX-AUDIT-2026-05-11.md.)
-//
-// `batchImport` increments `foldsInFlight` on entry and decrements in
-// `finally`. `flushToOpfs` awaits quiescence before writing — the wait
-// loops because a new fold can start in the gap between resolver firing
-// and the loop check (textbook condition-variable pattern), but in
-// practice flushes fire from visibility-change / post-hydrate so the
-// race is unusual.
-let foldsInFlight = 0;
-const foldQuiescentWaiters: Array<() => void> = [];
+  async dispatch(content) {
+    const { session, roomId } = get();
+    if (!session || !roomId) throw new Error('Not signed in to a room');
 
-function enterFold(): void {
-  foldsInFlight++;
-}
+    // 1. Optimistic local apply. The pending event lives under a temp key
+    //    until the Matrix ack stamps its real event_id.
+    const pendingKey = '$pending:' + nextTxnId();
+    const optimistic: EoEvent = { ...content, event_id: pendingKey, pending: true };
+    const events = new Map(get().events);
+    events.set(pendingKey, optimistic);
+    const records = applyEvent(get().records, optimistic);
+    set({ events, records });
 
-function exitFold(): void {
-  foldsInFlight = Math.max(0, foldsInFlight - 1);
-  if (foldsInFlight === 0 && foldQuiescentWaiters.length > 0) {
-    const drained = foldQuiescentWaiters.splice(0);
-    for (const w of drained) {
-      try { w(); } catch { /* never let one waiter break the next */ }
-    }
-  }
-}
-
-async function awaitFoldQuiescent(): Promise<void> {
-  while (foldsInFlight > 0) {
-    await new Promise<void>((resolve) => foldQuiescentWaiters.push(resolve));
-  }
-}
-
-interface EoDbState {
-  /** The in-memory store (set after space init) */
-  store: EoStore | null;
-  /** The fold worker client for OPFS persistence */
-  workerClient: FoldWorkerClient | null;
-  /**
-   * The durability barrier — the single owner of OPFS persistence for the
-   * current worker. Created in `init` per fold-worker client; null before
-   * the first space is initialized. All log appends and snapshot writes go
-   * through it so there is exactly one durability cursor (`durableSeq`).
-   */
-  persistence: PersistenceCoordinator | null;
-  /** The sync manager for sending events to Matrix */
-  syncManager: PeerSync | null;
-  /** Recent events processed through the fold */
-  recentEvents: EoEvent[];
-  /** Current sequence number */
-  lastSeq: number;
-  /** Whether the store is initialized and ready */
-  ready: boolean;
-  /** Resolved permissions for the current user in the current space */
-  resolvedPermissions: ResolvedPermissions | null;
-  /** Permission manifest for the current user (null if not loaded) */
-  userManifest: UserManifest | null;
-  /** Currently active user type (selected via header switcher) */
-  activeUserType: string | null;
-
-  /**
-   * Initialize the store from a fold worker client.
-   * Creates a fresh MemoryStore, replays the OPFS log into it, then
-   * enables OPFS persistence for future writes.
-   *
-   * Pass `workerHeadSeq` (the worker's `position.seq` at the moment `ready`
-   * was posted) to enable the "nothing changed since the snapshot" fast path —
-   * when it equals the kv-snapshot's seq, init skips scanLog, readLogSince,
-   * and the snapshot re-save entirely.
-   */
-  init: (workerClient: FoldWorkerClient, workerHeadSeq?: number) => Promise<void>;
-
-  /**
-   * Initialize a local-only store backed by a fold worker for the
-   * given space name (default "local"). No Matrix session needed.
-   */
-  initLocal: (dbName?: string) => Promise<void>;
-
-  setSyncManager: (syncManager: PeerSync) => void;
-  setPermissions: (permissions: ResolvedPermissions | null) => void;
-  setUserManifest: (manifest: UserManifest | null) => void;
-  /**
-   * Set the active persona. When `persist` is false (admin "preview as"),
-   * the selection is NOT written to localStorage, so on refresh the user
-   * falls back to their real assigned persona.
-   */
-  setActiveUserType: (typeId: string | null, persist?: boolean) => void;
-
-  dispatch: (event: EoEventInput) => Promise<number>;
-  batchImport: (events: EoEventInput[], onProgress?: (current: number, total: number) => void) => Promise<number>;
-  horizon: (target: string, opts?: HorizonOpts) => Promise<HorizonResponse | HorizonResponse[] | null>;
-  getState: (target: string) => Promise<EoState | null>;
-  getStateByPrefix: (prefix: string) => Promise<EoState[]>;
-  getStateByPrefixPage: (prefix: string, limit: number, afterTarget?: string) => Promise<StatePage>;
-  manualSnapshot: () => Promise<{ seq: number }>;
-  /**
-   * Persist the current kv map + recent-tail to OPFS.
-   * `hydratedHead`, when provided, records the block-chain event id this
-   * snapshot already covers. The boot path reads it back to skip a
-   * redundant chain walk even when localStorage is empty (e.g. cleared
-   * by browser, cross-device export). See block-hydration's
-   * `getPersistedHydratedHead`. (V9 of HELIX-AUDIT-2026-05-11.md.)
-   */
-  flushToOpfs: (hydratedHead?: string | null) => Promise<void>;
-  /**
-   * Hydration cursor recorded inside the last loaded kv-snapshot. Null
-   * means either no snapshot, an older v2 snapshot without the field,
-   * or a snapshot explicitly written without a chain cursor. (V9.)
-   */
-  snapshotHydratedHead: string | null;
-
-  /**
-   * True while a block-chain SEG / hydrate is in flight against the
-   * homeserver. Consumers that need fresh reads (admin tools,
-   * conflict-resolution UI) can subscribe to this and defer until it
-   * settles. Toggled by `runChainHydrate`. (V4 of
-   * HELIX-AUDIT-2026-05-11.md.)
-   */
-  hydratingChain: boolean;
-
-  /**
-   * Run a block-chain hydrate with the staleness flag set true for the
-   * duration. Wraps any `() => Promise<T>` so the helper composes with
-   * existing `hydrateBlocksIfStale` calls — flag is reset in `finally`
-   * even on rejection. Returns the hydrate's resolved value.
-   */
-  runChainHydrate: <T>(hydrate: () => Promise<T>) => Promise<T>;
-  teardown: () => void;
-
-  onDispatch: ((event: EoEventInput) => void) | null;
-  setOnDispatch: (fn: ((event: EoEventInput) => void) | null) => void;
-}
-
-export const useEoStore = create<EoDbState>((set, get) => ({
-  store: null,
-  workerClient: null,
-  persistence: null,
-  syncManager: null,
-  recentEvents: [],
-  lastSeq: 0,
-  ready: false,
-  resolvedPermissions: null,
-  userManifest: null,
-  activeUserType: null,
-  onDispatch: null,
-  snapshotHydratedHead: null,
-  hydratingChain: false,
-
-  async runChainHydrate<T>(hydrate: () => Promise<T>): Promise<T> {
-    // A counter on the module-level would handle overlap, but in
-    // practice Layout's gate (`ingestInFlight` per listener) already
-    // serializes hydrate calls per space. Toggle a boolean and rely on
-    // the caller to not double-invoke.
-    set({ hydratingChain: true });
+    // 2. Matrix PUT. On success, swap the pending key for the real id.
     try {
-      return await hydrate();
-    } finally {
-      set({ hydratingChain: false });
+      const { event_id } = await sendEvent(
+        session,
+        roomId,
+        EO_RECORD_TYPE,
+        {
+          operator: content.operator,
+          site: content.site,
+          resolution: content.resolution,
+          ts: content.ts,
+          agent: content.agent,
+          ...(content.seq !== undefined ? { seq: content.seq } : {}),
+        },
+        nextTxnId(),
+      );
+      const events2 = new Map(get().events);
+      events2.delete(pendingKey);
+      const settled: EoEvent = { ...content, event_id };
+      events2.set(event_id, settled);
+      // Re-derive: applyEvent on the same site with the same ts is idempotent
+      // under last-writer-wins, so we don't have to rebuild from scratch.
+      const records2 = applyEvent(get().records, settled);
+      set({ events: events2, records: records2 });
+    } catch (e) {
+      // Leave the optimistic event in place but mark its failure visibly.
+      // The user sees the row; a retry primitive will come in a follow-up.
+      console.warn('[eo-store] dispatch failed:', e);
+      throw e;
     }
   },
 
-  async init(workerClient: FoldWorkerClient, workerHeadSeq?: number) {
-    const wasReady = get().ready;
-    const prevClient = get().workerClient;
-    const isSameWorker = prevClient === workerClient;
+  async hydrate() {
+    const { session, roomId } = get();
+    if (!session || !roomId) return;
+    if (get().hydrating) return;
+    set({ hydrating: true, hydrateError: null });
 
-    if (wasReady && isSameWorker) {
-      // Re-init of same worker — nothing to replay.
-      set({ workerClient });
-      return;
-    }
-
-    // Different worker (space switch) — build a fresh memory store and a
-    // fresh durability coordinator. One coordinator per worker client: it
-    // owns the single durability cursor for this space's OPFS log.
-    const persistence = createPersistenceCoordinator(workerClient);
-    if (wasReady) {
-      set({ store: null, workerClient, persistence, recentEvents: [], lastSeq: 0, ready: false });
-    } else {
-      set({ store: null, workerClient, persistence, ready: false, recentEvents: [], lastSeq: 0 });
-    }
-
-    // ── Try restoring from OPFS kv snapshot for fast page-load ───────────────
-    // On the first load there's no snapshot yet; fall back to full log replay.
-    let snapshotSeq = 0;
-    let cachedTail: EoEvent[] = [];
-    let snapshotHit = false;
-    let snapshotHydratedHead: string | null = null;
-    let memStore: ReturnType<typeof createMemoryStore>;
-    const _initT0 = performance.now();
     try {
-      const snapshot = await loadKvSnapshot(workerClient);
-      if (snapshot) {
-        memStore = createMemoryStore({ initialKv: snapshot.entries, initialSeq: snapshot.seq });
-        snapshotSeq = snapshot.seq;
-        cachedTail = snapshot.recentTail;
-        snapshotHydratedHead = snapshot.hydratedHead ?? null;
-        snapshotHit = true;
-      } else {
-        memStore = createMemoryStore();
-      }
-    } catch {
-      memStore = createMemoryStore();
-    }
-    const _tSnapshot = performance.now();
-
-    // ── Auditability: keep the append-only log as the source of truth ───────
-    // A kv-snapshot whose seq is ahead of the worker's log head holds events
-    // the OPFS log never durably recorded (a prior session's appendRaw failed
-    // before the snapshot was written). The snapshot's own `log:` entries
-    // still carry those events, so re-append them — the log becomes the
-    // complete, audited record rather than the app silently trusting the
-    // snapshot or dropping the events. After a successful heal the log head
-    // equals the snapshot seq, so the fast path below treats it as caught up.
-    let healedHeadSeq = workerHeadSeq;
-    if (snapshotHit && workerHeadSeq !== undefined && snapshotSeq > workerHeadSeq) {
-      try {
-        const missing = await readLogSince(memStore, workerHeadSeq);
-        for (const ev of missing) await persistence.append(ev);
-        await persistence.awaitDurable();
-        healedHeadSeq = snapshotSeq;
-        console.warn(
-          `[EO-DB] healed OPFS log: re-appended ${missing.length} event(s) the ` +
-            `kv-snapshot held ahead of log head ${workerHeadSeq}`,
-        );
-      } catch (e) {
-        console.warn('[EO-DB] OPFS log heal failed:', e);
-      }
-    }
-
-    // ── Fast path: worker says the log hasn't advanced past the snapshot ─────
-    // When the (healed) log head equals `snapshotSeq` the log has literally no
-    // events the snapshot doesn't already include, so scanLog would return []
-    // anyway — skip it to avoid the extra worker roundtrip. This is the
-    // "refresh when nothing has changed" path: no replay, no snapshot resave.
-    const nothingNew =
-      snapshotHit &&
-      healedHeadSeq !== undefined &&
-      healedHeadSeq === snapshotSeq;
-
-    let replayedEvents: EoEvent[] = [];
-    let replayFailed = false;
-    if (!nothingNew) {
-      // Replay only events that arrived after the snapshot was written.
-      try {
-        replayedEvents = await scanLog(workerClient, snapshotSeq);
-        if (replayedEvents.length > 0) {
-          await replayFromLog(memStore, replayedEvents);
+      let from: string | undefined = undefined;
+      let pages = 0;
+      const seenSites = new Set<string>();
+      const all: EoEvent[] = [];
+      while (pages < 50) {
+        const page = await getMessages(session, roomId, { dir: 'b', limit: 100, from });
+        for (const ev of page.chunk) {
+          if (ev.type !== EO_RECORD_TYPE) continue;
+          const c = ev.content;
+          if (!c || typeof c.site !== 'string') continue;
+          all.push({
+            operator: c.operator,
+            site: c.site,
+            resolution: c.resolution ?? {},
+            ts: typeof c.ts === 'number' ? c.ts : ev.origin_server_ts,
+            agent: c.agent ?? ev.sender,
+            event_id: ev.event_id,
+            origin_server_ts: ev.origin_server_ts,
+            ...(typeof c.seq === 'number' ? { seq: c.seq } : {}),
+          });
+          seenSites.add(c.site);
         }
-      } catch (e) {
-        console.warn('[EO-DB] OPFS log replay failed:', e);
-        replayFailed = true;
+        pages++;
+        if (!page.end || page.chunk.length === 0) break;
+        from = page.end;
       }
-    }
-    const _tReplay = performance.now();
-
-    // From here on, every log: write also persists to OPFS through the
-    // coordinator. The returned promise lets MemoryStore track the queue;
-    // the coordinator tracks the same writes against `durableSeq` so a
-    // snapshot can drain them before capturing the kv map (otherwise a
-    // 30k-event burst can leave the kv-snapshot ahead of the OPFS log).
-    memStore.enablePersistence((event) => persistence.append(event));
-
-    const lastSeq = await memStore.getCurrentSeq();
-    // Seed the coordinator's durability cursor: every event the store holds
-    // at init came from the OPFS log (the kv-snapshot was built from log
-    // events; the delta replay read straight from the log), so it is all
-    // already durable. Without this seed, the post-init snapshot would warn
-    // that the entire restored kv map is "snapshot-only".
-    persistence.markDurable(lastSeq);
-
-    // Hydrate recentEvents — cap at the last 2 000 events to avoid loading
-    // a large array into Zustand state on init.  LogView loads older pages on demand.
-    const RECENT_EVENT_LIMIT = 2_000;
-    let hydrated: EoEvent[] = [];
-    if (nothingNew && cachedTail.length > 0) {
-      // Nothing changed since the snapshot was written, and the tail was
-      // persisted alongside it — use it directly and skip the O(n) scan of
-      // the memory store's log: entries.
-      hydrated = cachedTail;
-    } else if (!replayFailed && (snapshotHit || replayedEvents.length > 0)) {
-      // We already have every event needed: cachedTail covers everything up to
-      // snapshotSeq, replayedEvents covers the rest. Concatenating is
-      // equivalent to readLogSince(memStore, lastSeq - LIMIT) but skips an
-      // O(n) scan of the memory store's log: entries — the dominant cost on
-      // the refresh path for spaces with large event histories.
-      const combined = cachedTail.length > 0
-        ? [...cachedTail, ...replayedEvents]
-        : replayedEvents;
-      hydrated = combined.length > RECENT_EVENT_LIMIT
-        ? combined.slice(-RECENT_EVENT_LIMIT)
-        : combined;
-    } else {
-      // Fallback: snapshot miss with replay failure, or truly brand-new store.
-      // Scan the memStore for whatever's there.
-      try {
-        const fromSeq = Math.max(0, lastSeq - RECENT_EVENT_LIMIT);
-        hydrated = await readLogSince(memStore, fromSeq);
-      } catch {
-        // Brand-new store — nothing to hydrate.
+      // Sort ascending by ts so the fold sees them in causal order.
+      all.sort((a, b) => a.ts - b.ts);
+      const events = new Map<string, EoEvent>();
+      let records = new Map<string, Record_>();
+      for (const ev of all) {
+        if (ev.event_id) events.set(ev.event_id, ev);
+        records = applyEvent(records, ev);
       }
-    }
-
-    set({ store: memStore, workerClient, lastSeq, ready: true, recentEvents: hydrated, snapshotHydratedHead });
-
-    // Boot timing — surfaces where the "Initializing store" wait goes so the
-    // store-init slow path can be targeted from real numbers.
-    console.log(
-      `[EO-DB] init timing: kv-snapshot load=${(_tSnapshot - _initT0).toFixed(0)}ms` +
-        ` scan+replay=${(_tReplay - _tSnapshot).toFixed(0)}ms` +
-        ` total=${(performance.now() - _initT0).toFixed(0)}ms` +
-        ` — events=${lastSeq}, replayed=${replayedEvents.length},` +
-        ` workerHeadSeq=${workerHeadSeq ?? 'n/a'}, nothingNew=${nothingNew}`,
-    );
-
-    // ── Persist an updated snapshot for the next page refresh ────────────────
-    // Skip the resave when nothing changed — the on-disk snapshot is already
-    // current and re-writing it would waste the full msgpack-pack of the kv
-    // map on every refresh. In the delta-replay path, persist the new state
-    // (fire-and-forget) so the UI is unblocked immediately, and also ask the
-    // worker to refresh its init-cache so buildIndex can be skipped next time.
-    if (!nothingNew) {
-      // Carry forward the snapshot's hydration cursor (V9). The chain
-      // hasn't been re-walked here — the OPFS log delta replay only adds
-      // raw events — so the prior snapshot's chain coverage is still
-      // accurate. The coordinator drains pending appends (none at init,
-      // since replay ran before enablePersistence) and refreshes the
-      // init-cache alongside.
-      persistence.snapshot({
-        entries: memStore.getKvEntries(),
-        recentTail: hydrated,
-        seq: lastSeq,
-        hydratedHead: snapshotHydratedHead,
-      }).catch((e) => console.warn('[EO-DB] kv snapshot save failed:', e));
+      set({ events, records, hydrating: false, hydrated: true });
+    } catch (e: any) {
+      const msg = e instanceof MatrixError ? `${e.status} ${e.message}` : String(e?.message ?? e);
+      set({ hydrating: false, hydrateError: msg });
     }
   },
 
-  async initLocal(dbName = 'local') {
-    const workerClient = createFoldWorkerClient();
-    // Feed fold-cost telemetry to the PressureMonitor (Phase 1 observe-only).
-    workerClient.onTelemetry = ({ avgMicrosPerEvent }) => {
-      pressureMonitor.reportFoldMicros(avgMicrosPerEvent);
-    };
-    const { headSeq } = await initFoldWorker(workerClient, dbName);
-    await get().init(workerClient, headSeq);
-  },
-
-  setOnDispatch(fn: ((event: EoEventInput) => void) | null) {
-    set({ onDispatch: fn });
-  },
-
-  setSyncManager(syncManager: PeerSync) {
-    set({ syncManager });
-  },
-
-  setPermissions(permissions: ResolvedPermissions | null) {
-    set({ resolvedPermissions: permissions });
-  },
-
-  setUserManifest(manifest: UserManifest | null) {
-    set({ userManifest: manifest });
-  },
-
-  setActiveUserType(typeId: string | null, persist: boolean = true) {
-    set({ activeUserType: typeId });
-    if (!persist) return;
-    try {
-      if (typeId) {
-        localStorage.setItem('eo-active-user-type', typeId);
-      } else {
-        localStorage.removeItem('eo-active-user-type');
-      }
-    } catch { /* quota exceeded — silently drop */ }
-  },
-
-  async dispatch(event: EoEventInput) {
-    const { store } = get();
-    if (!store) throw new Error('Store not initialized');
-
-    // Pre-populate client_event_id for server deduplication.
-    const now = new Date().toISOString();
-    let populatedEvent: EoEventInput = event;
-    if (!populatedEvent.client_event_id) {
-      const id = await eventHash({
-        op: populatedEvent.op,
-        target: populatedEvent.target,
-        operand: populatedEvent.operand,
-        agent: populatedEvent.agent || '@local:localhost',
-        ts: populatedEvent.ts || now,
-      });
-      populatedEvent = { ...populatedEvent, client_event_id: id };
-    }
-
-    // Fold into the MemoryStore (persistence hook writes each log: entry to OPFS).
-    const seq = await processEvent(store, populatedEvent, (fullEvent) => {
-      set((state) => ({
-        recentEvents: [...state.recentEvents, fullEvent],
-        lastSeq: fullEvent.seq,
-      }));
-      // Broadcast to peers (encrypted, via Matrix to-device)
-      const sm = get().syncManager;
-      if (sm && 'broadcastLocalEvent' in sm) {
-        (sm as any).broadcastLocalEvent(fullEvent).catch((e: unknown) =>
-          console.warn('[EO-DB] broadcastLocalEvent failed:', e)
-        );
-      }
-    });
-
-    get().onDispatch?.(populatedEvent);
-    return seq;
-  },
-
-  async batchImport(events: EoEventInput[], onProgress?: (current: number, total: number) => void) {
-    // Bracket the fold so concurrent `flushToOpfs` calls wait for
-    // quiescence — see the comment on `foldsInFlight` above. The whole
-    // body runs inside the gate: chunk loop, store emits, and the final
-    // straggler emit all complete before quiescence is signalled.
-    enterFold();
-    try {
-    const { store } = get();
-    if (!store) throw new Error('Store not initialized');
-
-    // Memory-safe large-import strategy.
-    //
-    // A naive single-shot call into processEventsBulk with 1M events OOMs
-    // the browser:
-    //   - every event is allocated up-front by the caller
-    //   - the fold's wave-reservation and sort each duplicate the event list
-    //   - the worker path structured-clones a full snapshot per wave-step
-    //   - an accumulator of all folded events doubled peak memory for the
-    //     dubious benefit of checking `.length > 0` at the end
-    //
-    // Three things fix this:
-    //
-    //   1. We chunk the input. CHUNK_SIZE is the quantum passed to
-    //      processEventsBulk{,WithDispatcher}. Each chunk's internal
-    //      allocations are collectable as soon as the call returns, so
-    //      peak memory is O(chunk) not O(total).
-    //
-    //   2. We don't accumulate folded events. Previously `imported` grew
-    //      to a 1M-entry array just so we could gate a full post-import push
-    //      on whether anything was imported. Replaced with a boolean.
-    //
-    //   3. We throttle progress and recent-events updates. React doesn't
-    //      need 20,000 re-renders to show a progress bar — ~30/second is
-    //      plenty, and `requestAnimationFrame`-paced updates align with
-    //      the browser paint cycle for free.
-    const CHUNK_SIZE = 10_000;
-    const RECENTS_WINDOW = 100;
-    const PROGRESS_THROTTLE_MS = 33; // ~30 Hz
-
-    let anyImported = false;
-    // Rolling window of the most-recent folded events. Bounded to
-    // RECENTS_WINDOW so it never grows past 100 entries regardless of
-    // import size — the Zustand `recentEvents` selector only ever surfaces
-    // the last 100 events anyway, so buffering more is waste.
-    const recentsTail: EoEvent[] = [];
-    let maxFoldedSeq = 0;
-    let lastProgressAt = 0;
-    let lastReportedCurrent = 0;
-
-    const onFoldedEvent = (fullEvent: EoEvent): void => {
-      anyImported = true;
-      recentsTail.push(fullEvent);
-      if (recentsTail.length > RECENTS_WINDOW) {
-        recentsTail.shift();
-      }
-      if (fullEvent.seq > maxFoldedSeq) maxFoldedSeq = fullEvent.seq;
-    };
-
-    // Emit a single Zustand update combining the current recents tail
-    // with the latest seq. Called at chunk boundaries (not per event) so
-    // React only re-renders subscribers once per ~10k-event chunk — two
-    // orders of magnitude fewer renders than the previous 50-event batch.
-    const emitStoreUpdate = (finalSeq: number) => {
-      const snapshot = recentsTail.slice();
-      set((state) => ({
-        recentEvents: [...state.recentEvents, ...snapshot].slice(-RECENTS_WINDOW),
-        lastSeq: Math.max(state.lastSeq, finalSeq),
-      }));
-      // Start the next chunk with a clean recents buffer so the update
-      // after it doesn't re-publish events already added to the store.
-      recentsTail.length = 0;
-    };
-
-    const throttledProgress = onProgress
-      ? (current: number, total: number) => {
-          const now = Date.now();
-          if (
-            current === total ||
-            current - lastReportedCurrent >= 1000 ||
-            now - lastProgressAt >= PROGRESS_THROTTLE_MS
-          ) {
-            lastProgressAt = now;
-            lastReportedCurrent = current;
-            onProgress(current, total);
-          }
-        }
-      : undefined;
-
-    // Route to the shard-pool worker path above the threshold. Phase E–H
-    // shipped the shard-pool + worker transport; this is the wiring that
-    // actually exercises it. Below the threshold, or when the host can't
-    // spawn workers (Node / Vitest, single-core, no `Worker`), the legacy
-    // in-process bulk path is faster because it skips snapshot serialization
-    // and the structured-clone round-trip per wave-step.
-    const shardCount = preferredShardCount();
-    const useWorkerPath = events.length >= MIN_EVENTS_FOR_WORKER && shardCount >= 2;
-    const pool = useWorkerPath ? getOrCreateWorkerPool(shardCount) : null;
-
-    let lastSeq = 0;
-    const totalEvents = events.length;
-    let eventsProcessed = 0;
-
-    // Chunk loop. Each chunk is folded as its own bulk pass — the
-    // determinism harness's `chunked-bulk` runner proves this produces
-    // identical projections to a single-shot bulk fold. Between chunks we
-    // yield to the event loop so the UI can paint and the JS engine can
-    // run GC on the just-released chunk allocations.
-    for (let offset = 0; offset < totalEvents; offset += CHUNK_SIZE) {
-      const chunk = events.slice(offset, offset + CHUNK_SIZE);
-
-      const chunkProgress = throttledProgress
-        ? (current: number, _total: number) => {
-            throttledProgress(eventsProcessed + current, totalEvents);
-          }
-        : undefined;
-
-      let chunkLastSeq: number;
-      if (pool) {
-        chunkLastSeq = await processEventsBulkWithDispatcher(
-          store, chunk, shardCount, pool.dispatcher, chunkProgress, onFoldedEvent,
-        );
-      } else {
-        chunkLastSeq = await processEventsBulk(store, chunk, chunkProgress, onFoldedEvent);
-      }
-
-      lastSeq = Math.max(lastSeq, chunkLastSeq);
-      eventsProcessed += chunk.length;
-
-      // One store update per chunk — picks up the rolling recents window
-      // and the current lastSeq. HolonNav / Layout re-render at chunk
-      // cadence, not per event.
-      emitStoreUpdate(lastSeq);
-
-      // Let the UI paint and let the JS engine reclaim per-chunk allocations
-      // (the snapshot, the wave groupings, the mutation logs) before the
-      // next chunk starts. Without this yield, 1M-row imports hold the main
-      // thread for the entire fold and the browser kills the tab for
-      // unresponsiveness.
-      await new Promise<void>((resolve) => setTimeout(resolve, 0));
-    }
-
-    // Final update: in the single-chunk case, emitStoreUpdate already ran
-    // inside the loop. Call once more with maxFoldedSeq to guarantee any
-    // straggler events picked up by onFoldedEvent after the last chunk's
-    // update are reflected in recentEvents.
-    if (anyImported) emitStoreUpdate(Math.max(lastSeq, maxFoldedSeq));
-    onProgress?.(totalEvents, totalEvents);
-
-    return lastSeq;
-    } finally { exitFold(); }
-  },
-
-  async horizon(target: string, opts?: HorizonOpts) {
-    const { store } = get();
-    if (!store) throw new Error('Store not initialized');
-    return horizonGet(store, target, opts);
-  },
-
-  async getState(target: string) {
-    const { store } = get();
-    if (!store) throw new Error('Store not initialized');
-    return getState(store, target);
-  },
-
-  async getStateByPrefix(prefix: string) {
-    const { store } = get();
-    if (!store) throw new Error('Store not initialized');
-    return getStateByPrefix(store, prefix);
-  },
-
-  async getStateByPrefixPage(prefix: string, limit: number, afterTarget?: string) {
-    const { store } = get();
-    if (!store) throw new Error('Store not initialized');
-    return getStateByPrefixPage(store, prefix, limit, afterTarget);
-  },
-
-  async manualSnapshot() {
-    const { store, persistence, recentEvents, snapshotHydratedHead } = get();
-    if (!store) throw new Error('Store not initialized');
-
-    // Persist the current in-memory KV state to OPFS. `snapshot()` drains
-    // any in-flight appends first — without that barrier a manual snapshot
-    // taken right after a write burst captures a kv-snapshot whose `seq`
-    // claims events still in flight to the OPFS log.
-    const lastSeq = await store.getCurrentSeq();
-    const memStore = store as MemoryStore;
-    if (persistence && typeof memStore.getKvEntries === 'function') {
-      try {
-        await persistence.snapshot({
-          entries: memStore.getKvEntries(),
-          recentTail: recentEvents,
-          seq: lastSeq,
-          hydratedHead: snapshotHydratedHead,
-        });
-      } catch (e) {
-        console.warn('[EO-DB] manualSnapshot: kv snapshot save failed:', e);
-      }
-    }
-
-    return { seq: lastSeq };
-  },
-
-  async flushToOpfs(hydratedHead?: string | null) {
-    // Wait for any in-flight batchImport to drain before capturing the
-    // kv-snapshot. Without this, a snapshot written mid-fold reports a
-    // `seq` whose corresponding kv entries are still being mutated by
-    // the fold engine. The on-disk dedup keeps subsequent loads
-    // correct, but the snapshot's claim of coverage becomes a lie.
-    // (V10 of HELIX-AUDIT-2026-05-11.md.)
-    await awaitFoldQuiescent();
-    const { store, persistence, recentEvents, snapshotHydratedHead } = get();
-    if (!store) throw new Error('Store not initialized');
-    const memStore = store as MemoryStore;
-    const lastSeq = await store.getCurrentSeq();
-    if (persistence && typeof memStore.getKvEntries === 'function') {
-      // If the caller didn't tell us "this snapshot now covers chain head X",
-      // carry forward whatever cursor the last snapshot already claimed.
-      // Persisting the cursor inside the snapshot makes it atomic with the
-      // kv map, so a missing localStorage entry no longer means
-      // "re-walk the entire chain". (V9.)
-      //
-      // `snapshot()` drains every in-flight append BEFORE capturing the kv
-      // map. Without that barrier a hydration that just ran 30k processEvent
-      // calls can leave the OPFS log behind the kv map, and a hard reload
-      // restores a snapshot whose log: entries aren't actually on disk.
-      const head = hydratedHead === undefined ? snapshotHydratedHead : hydratedHead;
-      await persistence.snapshot({
-        entries: memStore.getKvEntries(),
-        recentTail: recentEvents,
-        seq: lastSeq,
-        hydratedHead: head,
-      });
-      if (head !== snapshotHydratedHead) {
-        set({ snapshotHydratedHead: head });
-      }
-    }
-  },
-
-  teardown() {
-    const { store, workerClient } = get();
-    if (store) store.close();
-    if (workerClient) workerClient.worker.terminate();
-    // Drop the shard-worker pool alongside the fold worker so teardown is
-    // a clean shutdown with no lingering OS threads.
-    terminateCachedWorkerPool();
+  reset() {
     set({
-      store: null,
-      workerClient: null,
-      persistence: null,
-      syncManager: null,
-      ready: false,
-      recentEvents: [],
-      lastSeq: 0,
-      resolvedPermissions: null,
-      userManifest: null,
-      activeUserType: null,
-      onDispatch: null,
+      session: null,
+      roomId: null,
+      events: new Map(),
+      records: new Map(),
+      hydrating: false,
+      hydrateError: null,
+      hydrated: false,
     });
   },
 }));
-
-/**
- * Throttled per-event listener for bulk-import paths that fold events
- * directly through `processEvent` (e.g. Airtable hydration / update sync,
- * which iterate records one at a time rather than calling `batchImport`).
- *
- * Without this, the events land in the MemoryStore + OPFS log, but the
- * Zustand `recentEvents` / `lastSeq` state is never bumped — so subscribers
- * like TableView (which re-fetches on `lastSeq` change, see TableView.tsx
- * deps array) never refresh and the import appears to vanish until the next
- * page reload.
- *
- * Returns `{ onEvent, finalize }`. Pass `onEvent` as the per-event hook to
- * the import flow, and call `finalize()` after the import settles to flush
- * any pending update so the UI sees the final state immediately.
- *
- * Updates are throttled to ~10 Hz and the recents tail is capped at 100
- * events (mirroring `batchImport`'s RECENTS_WINDOW) so a 30k-event Airtable
- * hydration causes at most a few hundred Zustand updates rather than 30k.
- */
-export function createImportProgressListener(): {
-  onEvent: (event: EoEvent) => void;
-  finalize: () => void;
-} {
-  const RECENTS_WINDOW = 100;
-  const FLUSH_MS = 100;
-  let recentsTail: EoEvent[] = [];
-  let maxSeq = 0;
-  let dirty = false;
-  let pending: ReturnType<typeof setTimeout> | null = null;
-
-  const flush = () => {
-    if (pending !== null) {
-      clearTimeout(pending);
-      pending = null;
-    }
-    if (!dirty) return;
-    const snapshot = recentsTail;
-    const seq = maxSeq;
-    recentsTail = [];
-    dirty = false;
-    useEoStore.setState((state) => ({
-      recentEvents: [...state.recentEvents, ...snapshot].slice(-RECENTS_WINDOW),
-      lastSeq: Math.max(state.lastSeq, seq),
-    }));
-  };
-
-  const onEvent = (event: EoEvent): void => {
-    recentsTail.push(event);
-    if (recentsTail.length > RECENTS_WINDOW) recentsTail.shift();
-    if (event.seq > maxSeq) maxSeq = event.seq;
-    dirty = true;
-    if (pending === null) {
-      pending = setTimeout(flush, FLUSH_MS);
-    }
-  };
-
-  return { onEvent, finalize: flush };
-}
