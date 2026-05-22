@@ -11,24 +11,52 @@ import {
 import { Modal } from './Modal';
 import { CommandPalette, type Command } from './CommandPalette';
 import { createFoldWorkerClient, initFoldWorker, type FoldWorkerClient } from '../db/lazy-fold';
-import { PeerSync } from '../matrix/peer-sync';
-import { WebRTCPeer } from '../matrix/webrtc-peer';
-import {
-  hydrateBlocksIfStale,
-  listenForChainUpdates,
-  isAutoIngestEnabled,
-  getPersistedHydratedHead,
-  setPersistedHydratedHead,
-} from '../sync/block-hydration';
-import type { BlockDriveMirrorDeps } from '../sync/block-drive-mirror';
-import {
-  startNetworkSyncSystem,
-  isOperatorSyncEnabled,
-  type NetworkSyncSystem,
-} from '../sync/network-sync-system';
-import { Presence, type PresenceUser } from '../matrix/presence';
-import { usePresencePrefs } from '../lib/presence-prefs';
-import { OnlineUsers } from './OnlineUsers';
+
+// ─── Transitional stubs after the sync/P2P/peer-sync rip ───────────────────
+// These no-ops keep Layout's setup code compiling while individual call sites
+// are removed in a follow-up cleanup pass. None of them do anything — peer
+// sync, presence, block-chain hydration, and the network-sync system are all
+// gone. The room timeline is the canonical sync surface now.
+type PeerSync = { destroy(): void; start(): Promise<void>; stop(): void; setWebRTCPeer(p: any): void };
+type WebRTCPeer = { stop(): void; start(): void };
+type NetworkSyncSystem = { stop(): void };
+type Presence = {
+  stop(): void;
+  start(): void;
+  setShareLocation(b: boolean): void;
+  setLocation(loc: any): void;
+  subscribe(cb: (peers: PresenceUser[]) => void): () => void;
+};
+type PresenceUser = { userId: string; displayName?: string; location?: any };
+type BlockDriveMirrorDeps = unknown;
+type AnyOpts = { bulkApply?: (events: any[]) => void; mirror?: any; onProgress?: (e: any) => void };
+const hydrateBlocksIfStale = (
+  _client: any, _roomId: string, _store: any, _opts?: AnyOpts,
+): Promise<{ latestBlockEventId?: string }> => Promise.resolve({});
+const listenForChainUpdates = (
+  _client: any, _roomId: string, _cb: (events: any[]) => void,
+): (() => void) => () => {};
+const isAutoIngestEnabled = (_roomId: string): boolean => false;
+const getPersistedHydratedHead = (_roomId: string): string | null => null;
+const setPersistedHydratedHead = (_roomId: string, _head: string): void => {};
+const startNetworkSyncSystem = (..._args: any[]): NetworkSyncSystem => ({ stop() {} });
+const isOperatorSyncEnabled = (_roomId: string): boolean => false;
+const usePresencePrefs = () => [{ shareLocation: false, showPeers: false }] as const;
+// Placeholder runtime ctors used by `new PeerSync(...)` / `new WebRTCPeer(...)` /
+// `new Presence(...)` call sites pending removal.
+const PeerSync = class { destroy() {} async start() {} setWebRTCPeer(_p: any) {} } as unknown as { new (...args: any[]): PeerSync };
+const WebRTCPeer = class { stop() {} } as unknown as { new (...args: any[]): WebRTCPeer };
+const Presence = class {
+  stop() {}
+  setShareLocation(_b: boolean) {}
+  setLocation(_loc: any) {}
+  subscribe(_cb: (peers: PresenceUser[]) => void) { return () => {}; }
+} as unknown as { new (...args: any[]): Presence };
+void hydrateBlocksIfStale; void listenForChainUpdates; void isAutoIngestEnabled;
+void getPersistedHydratedHead; void setPersistedHydratedHead;
+void startNetworkSyncSystem; void isOperatorSyncEnabled; void usePresencePrefs;
+void PeerSync; void WebRTCPeer; void Presence;
+
 import {
   loadSpaceKeyring,
   generateSpaceKey,
@@ -119,7 +147,6 @@ import { type AccessRole, type UserTypeDefinition, type SpaceConfig, type Termin
 import { DEFAULT_LAW_FIRM_PERSONAS } from '../permissions/default-personas';
 import { UserTypeSwitcher } from './UserTypeSwitcher';
 import { resolvePermissionsFromSharing, getUserPowerLevel } from '../permissions/resolve';
-const MultiUserTestView = lazyWithRetry(() => import('./MultiUserTestView').then(m => ({ default: m.MultiUserTestView })));
 import { RecycleBin, addDeletedSpace, isSpaceDeleted, removeDeletedSpace, getDeletedSpaces } from './RecycleBin';
 import { addArchivedSpace, isSpaceArchived, removeArchivedSpace, getArchivedSpaces } from './ArchivedSpaces';
 import { setSpaceConfig, getSpaceConfig, applyEoPowerLevels, EO_SPACE_CONFIG_TYPE } from '../permissions/room-topology';
@@ -1891,7 +1918,7 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
               useEoStore.getState().store!,
               onFoldEvent,
               undefined,
-              (events) => useEoStore.getState().batchImport(events),
+              (events: any[]) => useEoStore.getState().batchImport(events),
             );
             ps.setWebRTCPeer(wrtc);
             await ps.start();
@@ -2052,7 +2079,7 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
       let operatorSync: NetworkSyncSystem | null = null;
 
       const useOperatorSync = isOperatorSyncEnabled(
-        (import.meta as unknown as { env?: Record<string, string | undefined> }).env?.VITE_NETWORK_SYNC_WORKER,
+        (import.meta as unknown as { env?: Record<string, string | undefined> }).env?.VITE_NETWORK_SYNC_WORKER ?? '',
       );
 
       if (MATRIX_ENABLED && spaceRoomId && matrixClientRef.current) {
@@ -2068,11 +2095,7 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
               userId: session.userId,
               deviceId: matrixClientRef.current.getDeviceId() ?? '',
               onFoldEvent,
-              createWorker: () =>
-                new Worker(new URL('../workers/network-sync.worker.ts', import.meta.url), {
-                  type: 'module',
-                  name: 'eo-network-sync',
-                }),
+              createWorker: () => null,
             });
             if (isStale()) { await operatorSync.stop(); webrtcPeer.stop(); return; }
             cleanupFns.push(() => {
@@ -2103,7 +2126,7 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
               psStore,
               onFoldEvent,
               undefined,
-              (events) => useEoStore.getState().batchImport(events),
+              (events: any[]) => useEoStore.getState().batchImport(events),
               psChainSeg,
             );
             peerSync.setWebRTCPeer(webrtcPeer);
@@ -2250,7 +2273,7 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
           );
         const ps = new PeerSync(
           client, roomId, store, onFoldEvent, undefined,
-          (events) => useEoStore.getState().batchImport(events),
+          (events: any[]) => useEoStore.getState().batchImport(events),
           psChainSeg,
         );
         ps.setWebRTCPeer(wrtc);
@@ -2803,15 +2826,6 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
         </div>
 
         <div style={s.topBarRight}>
-          {/* Stats — hidden on mobile, compact on tablet */}
-          {!isMobile && (
-            <OnlineUsers
-              presence={presence}
-              selfUserId={session.userId}
-              selfDisplayName={displayName}
-              showPeers={presencePrefs.showPeers}
-            />
-          )}
           <ConnectionStatus
             state={connectionState}
             onRetry={connectionError?.phase === 'auth' ? handleLogout : retrySync}
@@ -3116,14 +3130,6 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
                 Settings
               </button>
             )}
-            <div style={s.navGroupLabel}>Testing</div>
-            <button
-              onClick={() => openRouteAsTab({ view: 'multiuser', space: selectedSpace }, { reuseByView: true })}
-              style={navItemStyle('multiuser')}
-            >
-              <span style={s.navIcon}>{NAV_ICONS.multiuser}</span>
-              Multi-User Test
-            </button>
             {/* Hidden views badge — shown when role restricts nav access */}
             {hiddenCount > 0 && roleAccentColor && (
               <div style={{
@@ -3374,8 +3380,6 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
               )
             ) : activeView === 'settings' ? (
               <SettingsView session={session} matrixClient={matrixClientRef.current} roomId={spaceRoomId} spaceRooms={spaceRooms ?? null} onUnarchive={handleUnarchiveSpace} connectionState={connectionState} connectionError={connectionError} matrixReady={matrixReady} onRetry={retrySync} onLogout={handleLogout} />
-            ) : activeView === 'multiuser' ? (
-              <MultiUserTestView matrixClient={matrixClientRef.current} roomId={spaceRoomId} presence={presence} />
             ) : null}
             </Suspense>
           </ErrorBoundary>}

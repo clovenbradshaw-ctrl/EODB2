@@ -15,15 +15,12 @@ import {
   listAllHomeserverUsers,
   type DiscoveredUser,
 } from '../matrix/user-discovery';
-import { findOrCreateDirectMessage } from '../matrix/dm';
 
 interface PeopleViewProps {
   matrixClient: MatrixClient;
-  /** Called after a DM room is created/found so the caller can navigate to it. */
-  onOpenDirectMessage?: (roomId: string, userId: string) => void;
 }
 
-export function PeopleView({ matrixClient, onOpenDirectMessage }: PeopleViewProps) {
+export function PeopleView({ matrixClient }: PeopleViewProps) {
   const { theme } = useTheme();
   const s = makeStyles(theme);
 
@@ -32,7 +29,6 @@ export function PeopleView({ matrixClient, onOpenDirectMessage }: PeopleViewProp
   const [searchResults, setSearchResults] = useState<DiscoveredUser[]>([]);
   const [loading, setLoading] = useState(true);
   const [searching, setSearching] = useState(false);
-  const [starting, setStarting] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
 
   const debounceRef = useRef<ReturnType<typeof setTimeout>>();
@@ -74,19 +70,6 @@ export function PeopleView({ matrixClient, onOpenDirectMessage }: PeopleViewProp
     setQuery(value);
     if (debounceRef.current) clearTimeout(debounceRef.current);
     debounceRef.current = setTimeout(() => doSearch(value), 250);
-  }
-
-  async function handleMessage(user: DiscoveredUser) {
-    setStarting(user.userId);
-    setError(null);
-    try {
-      const roomId = await findOrCreateDirectMessage(matrixClient, user.userId);
-      onOpenDirectMessage?.(roomId, user.userId);
-    } catch (e: any) {
-      setError(`Failed to start conversation with ${user.displayName}: ${e?.message || e}`);
-    } finally {
-      setStarting(null);
-    }
   }
 
   // Local filter on the default list for instant feedback while typing
@@ -134,8 +117,6 @@ export function PeopleView({ matrixClient, onOpenDirectMessage }: PeopleViewProp
             user={user}
             matrixClient={matrixClient}
             theme={theme}
-            starting={starting === user.userId}
-            onMessage={() => handleMessage(user)}
           />
         ))}
       </div>
@@ -151,14 +132,10 @@ function UserRow({
   user,
   matrixClient,
   theme,
-  starting,
-  onMessage,
 }: {
   user: DiscoveredUser;
   matrixClient: MatrixClient;
   theme: Theme;
-  starting: boolean;
-  onMessage: () => void;
 }) {
   const mono = "'JetBrains Mono', monospace";
   const localpart = user.userId.startsWith('@')
@@ -222,24 +199,6 @@ function UserRow({
         </div>
       </div>
 
-      <button
-        onClick={onMessage}
-        disabled={starting}
-        style={{
-          padding: '6px 12px',
-          background: starting ? theme.bgMuted : theme.accent,
-          color: starting ? theme.textMuted : '#fff',
-          border: 'none',
-          borderRadius: 6,
-          cursor: starting ? 'default' : 'pointer',
-          fontFamily: mono,
-          fontSize: 11,
-          fontWeight: 500,
-          flexShrink: 0,
-        }}
-      >
-        {starting ? 'Opening…' : 'Message'}
-      </button>
     </div>
   );
 }

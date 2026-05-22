@@ -23,7 +23,9 @@ import {
   type PersistenceCoordinator,
 } from '../db/persistence-coordinator';
 import type { EoEvent, EoEventInput, EoState, HorizonResponse } from '../db/types';
-import type { PeerSync } from '../matrix/peer-sync';
+// PeerSync was ripped — the syncManager slot is preserved as a placeholder
+// (e.g. for future REST-based subscription handle) but now opaquely typed.
+type PeerSync = { destroy(): void };
 import type { ResolvedPermissions } from '../permissions/types';
 import type { ManifestState as UserManifest } from '../permissions/space-manifest';
 import { eventHash } from '../db/hash';

@@ -8,8 +8,6 @@ import { MatrixRoomsViewer } from './MatrixRoomsViewer';
 import { UserRoomsBySpaces } from './UserRoomsBySpaces';
 import { OP_COLORS, TRIAD_LABELS } from './LogView';
 import { ArchivedSpacesSection } from './ArchivedSpaces';
-import { SeedSpaceSection } from './SeedSpaceSection';
-import { BlockListSection } from './BlockListSection';
 import { buildSettingChangeEvent } from '../lib/settings-events';
 import { SettingsActivity } from './SettingsActivity';
 
@@ -312,23 +310,6 @@ export function SettingsView({ session, matrixClient, roomId, spaceRooms, onUnar
             <ArchivedSpacesSection onUnarchive={onUnarchive} />
           </Section>
         )}
-
-        {/* Seed this space — upload a .eodb to bootstrap this room. */}
-        <Section title="Seed this Space" theme={theme}>
-          <SeedSpaceSection
-            matrixClient={matrixClient}
-            roomId={roomId}
-            collectionId={roomId}
-          />
-        </Section>
-
-        {/* Uploaded blocks — list + per-block enable/disable. */}
-        <Section title="Uploaded Blocks" theme={theme}>
-          <BlockListSection
-            matrixClient={matrixClient}
-            roomId={roomId}
-          />
-        </Section>
 
         {/* EO Operator Reference */}
         <Section title="EO Operator Reference" theme={theme}>

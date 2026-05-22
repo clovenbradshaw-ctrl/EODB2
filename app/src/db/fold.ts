@@ -27,7 +27,10 @@ import { syncDefToGpu, dispatchEvalGpu } from './gpu-dispatch';
 import { partitionTargets } from './fold-pool';
 import type { EoEvent, EoEventInput, EoState, EvaRegistration, RecResult, ExternalOperator, DerivedEntity, LoggableOperator, Resolution } from './types';
 import { nulStateToResolution } from './types';
-import { isSyncTarget } from '../sync/sites';
+// Sync targets (peer:/swarm:/log:/piece:/tail:) were P2P attestation sites
+// emitted by the now-ripped sync worker. Nothing emits them anymore, so the
+// guard is always false.
+function isSyncTarget(_target: string): boolean { return false; }
 
 export { sortByHelixLevel } from './fold-core';
 export type { HelixWave } from './fold-core';

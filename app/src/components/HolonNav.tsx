@@ -2,7 +2,10 @@ import { useEffect, useState, useMemo, useRef, useCallback } from 'react';
 import type { EoState } from '../db/types';
 import { useEoStore } from '../store/eo-store';
 import type { FilterDefinition } from './filter-types';
-import type { PresenceUser } from '../matrix/presence';
+// PresenceUser kept as a placeholder type after the presence subsystem
+// was ripped — HolonNav no longer receives live peers but the prop shape
+// stays so callers can pass an empty map without code change.
+type PresenceUser = { userId: string; displayName?: string };
 import { useTheme, type Theme } from '../theme';
 import { ContextMenu, type ContextMenuItem } from './ContextMenu';
 import { TypeSelector, TypeBadge } from './TypeSelector';
