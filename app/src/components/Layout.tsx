@@ -57,20 +57,23 @@ void getPersistedHydratedHead; void setPersistedHydratedHead;
 void startNetworkSyncSystem; void isOperatorSyncEnabled; void usePresencePrefs;
 void PeerSync; void WebRTCPeer; void Presence;
 
-import {
-  loadSpaceKeyring,
-  generateSpaceKey,
-  importDeliveredKey,
-  exportKeyMaterial,
-} from '../crypto/keyring-store';
-import {
-  KEY_DELIVER_TYPE,
-  KEY_HEAL_REQUEST_TYPE,
-  KEY_HEAL_RESPONSE_TYPE,
-  type KeyDeliverPayload,
-  type KeyHealRequest,
-  type KeyHealResponse,
-} from '../crypto/key-delivery';
+// Megolm-style space keyring + key-delivery system ripped. The crypto
+// envelope on records and the local cache is being replaced with a
+// single AES-GCM key derived from the Matrix access token; that lives
+// elsewhere. Stubs here keep the (already-no-op) BlockDriveMirror deps
+// shape stable until the call sites are pulled.
+const loadSpaceKeyring = async (_roomId: string): Promise<null> => null;
+const generateSpaceKey = async (..._args: any[]): Promise<null> => null;
+const importDeliveredKey = async (..._args: any[]): Promise<null> => null;
+const exportKeyMaterial = async (..._args: any[]): Promise<null> => null;
+const KEY_DELIVER_TYPE = 'com.eo-db.key.deliver.stub';
+const KEY_HEAL_REQUEST_TYPE = 'com.eo-db.key.heal-request.stub';
+const KEY_HEAL_RESPONSE_TYPE = 'com.eo-db.key.heal-response.stub';
+type KeyDeliverPayload = unknown;
+type KeyHealRequest = unknown;
+type KeyHealResponse = unknown;
+void loadSpaceKeyring; void generateSpaceKey; void importDeliveredKey; void exportKeyMaterial;
+void KEY_DELIVER_TYPE; void KEY_HEAL_REQUEST_TYPE; void KEY_HEAL_RESPONSE_TYPE;
 import { resolveDataRoom } from '../matrix/event-bridge';
 import { configureMatrixDomain, isAminoHomeserver } from '../lib/matrix-domain';
 import { HolonNav } from './HolonNav';
