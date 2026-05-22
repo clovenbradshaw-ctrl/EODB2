@@ -16,7 +16,9 @@ export function RecordList({ collection, onOpen }: Props) {
 
   const rows = useMemo(() => {
     const all = Array.from(records.values()).filter((r) => !r.cleared);
-    let scoped = all;
+    // Hide media child sites — they're rendered inside the parent record's
+    // drawer, not as top-level rows.
+    let scoped = all.filter((r) => !r.site.includes('.media.'));
     if (collection !== null) {
       scoped = all.filter((r) => {
         const dot = r.site.indexOf('.');

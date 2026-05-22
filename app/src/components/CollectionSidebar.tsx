@@ -27,6 +27,8 @@ export function CollectionSidebar({ selected, onSelect }: Props) {
     const counts = new Map<string, number>();
     for (const rec of records.values()) {
       if (rec.cleared) continue;
+      // Don't count media-child sites toward collection counts.
+      if (rec.site.includes('.media.')) continue;
       const dot = rec.site.indexOf('.');
       const col = dot === -1 ? rec.site : rec.site.slice(0, dot);
       counts.set(col, (counts.get(col) ?? 0) + 1);
