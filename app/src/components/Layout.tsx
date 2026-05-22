@@ -32,7 +32,7 @@ function defaultAlias(session: Session): string {
 }
 
 export function Layout({ session, onLogout }: Props) {
-  const { roomId, setRoom, setSession, loadFromCache, hydrate, hydrating, hydrated, hydrateError, applyRemote, reset } = useEoStore();
+  const { roomId, setRoom, setSession, loadFromCache, hydrate, hydrating, hydrated, hydrateError, applyRemote, flushPending, reset } = useEoStore();
   const [liveError, setLiveError] = useState<string | null>(null);
   const [resolveError, setResolveError] = useState<string | null>(null);
   const [selectedSite, setSelectedSite] = useState<string | null>(null);
@@ -91,14 +91,25 @@ export function Layout({ session, onLogout }: Props) {
     const stop = subscribeRoom(
       session,
       roomId,
-      (events) => applyRemote(events),
+      (events) => {
+        applyRemote(events);
+        // Each successful /sync tick means the server is reachable —
+        // a good moment to retry any pending writes.
+        void flushPending();
+      },
       (err) => {
         const msg = err instanceof MatrixError ? `${err.status} ${err.message}` : String((err as any)?.message ?? err);
         setLiveError(msg);
       },
     );
-    return stop;
-  }, [session, roomId, hydrated, applyRemote]);
+    // Also retry pending events whenever the browser flips back online,
+    // and once on mount in case we cached pending writes from a prior
+    // session that never reached the server.
+    void flushPending();
+    const onOnline = () => { void flushPending(); };
+    window.addEventListener('online', onOnline);
+    return () => { stop(); window.removeEventListener('online', onOnline); };
+  }, [session, roomId, hydrated, applyRemote, flushPending]);
 
   function logout() {
     if (roomId) {

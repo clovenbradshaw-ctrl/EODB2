@@ -69,8 +69,13 @@ export interface CacheKey {
   accessToken: string;
 }
 
+export interface CacheContents {
+  acked: EoEvent[];
+  pending: EoEvent[];
+}
+
 /** Load and decrypt the cache for this user/room. Returns null on miss/error. */
-export async function loadCache(key: CacheKey): Promise<EoEvent[] | null> {
+export async function loadCache(key: CacheKey): Promise<CacheContents | null> {
   const dir = await opfsDir();
   if (!dir) return null;
   const name = await cacheFilename(key.userId, key.roomId);
@@ -95,8 +100,15 @@ export async function loadCache(key: CacheKey): Promise<EoEvent[] | null> {
     const pt = await crypto.subtle.decrypt({ name: 'AES-GCM', iv }, aesKey, ct);
     const json = new TextDecoder().decode(pt);
     const parsed = JSON.parse(json);
-    if (!Array.isArray(parsed)) return null;
-    return parsed as EoEvent[];
+    // v1 of the file was a bare array of acked events; v2 is { acked, pending }.
+    if (Array.isArray(parsed)) return { acked: parsed as EoEvent[], pending: [] };
+    if (parsed && Array.isArray(parsed.acked)) {
+      return {
+        acked: parsed.acked as EoEvent[],
+        pending: Array.isArray(parsed.pending) ? (parsed.pending as EoEvent[]) : [],
+      };
+    }
+    return null;
   } catch {
     // Wrong key (e.g. token rotated) or corrupted file. Caller should
     // proceed without the cache; we'll rewrite a fresh one after hydrate.
@@ -112,11 +124,17 @@ export async function saveCache(key: CacheKey, events: EoEvent[]): Promise<void>
   const iv = crypto.getRandomValues(new Uint8Array(12));
   const salt = crypto.getRandomValues(new Uint8Array(16));
   const aesKey = await deriveKey(key.accessToken, salt);
-  // Strip pending events — they have local-only event_ids and will be
-  // re-dispatched by the user (or surfaced as failures). Cache only what
-  // Matrix has acked.
-  const acked = events.filter((e) => e.event_id && !e.event_id.startsWith('$pending:'));
-  const pt = new TextEncoder().encode(JSON.stringify(acked));
+  // Split acked vs pending. Acked events are the fold's source of truth;
+  // pending events are offline edits that haven't reached Matrix yet —
+  // we persist them so they survive a reload and a background retry can
+  // flush them when connectivity returns.
+  const acked: EoEvent[] = [];
+  const pending: EoEvent[] = [];
+  for (const e of events) {
+    if (e.event_id && !e.event_id.startsWith('$pending:')) acked.push(e);
+    else if (e.pending && e.txn_id) pending.push(e);
+  }
+  const pt = new TextEncoder().encode(JSON.stringify({ acked, pending }));
   const ct = new Uint8Array(await crypto.subtle.encrypt({ name: 'AES-GCM', iv }, aesKey, pt));
   const out = new Uint8Array(4 + 4 + 12 + 16 + ct.byteLength);
   out.set(MAGIC, 0);

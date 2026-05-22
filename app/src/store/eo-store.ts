@@ -72,6 +72,9 @@ interface EoStore {
   /** Apply timeline events arriving from /sync. Idempotent by event_id. */
   applyRemote(events: MatrixTimelineEvent[]): void;
 
+  /** Retry pending (un-acked) events. Safe to call repeatedly. */
+  flushPending(): Promise<void>;
+
   /** Reset all in-memory state. Used on logout. */
   reset(): void;
 }
@@ -92,16 +95,24 @@ export const useEoStore = create<EoStore>((set, get) => ({
     const { session, roomId } = get();
     if (!session || !roomId) throw new Error('Not signed in to a room');
 
-    // 1. Optimistic local apply. The pending event lives under a temp key
-    //    until the Matrix ack stamps its real event_id.
-    const pendingKey = '$pending:' + nextTxnId();
-    const optimistic: EoEvent = { ...content, event_id: pendingKey, pending: true };
+    // 1. Optimistic local apply. The pending event carries a stable
+    //    txn_id so a retry (after reload, after reconnect) re-PUTs with
+    //    the same id — Matrix dedups server-side and returns the
+    //    existing event_id instead of creating a duplicate.
+    const txn_id = nextTxnId();
+    const pendingKey = '$pending:' + txn_id;
+    const optimistic: EoEvent = { ...content, event_id: pendingKey, pending: true, txn_id };
     const events = new Map(get().events);
     events.set(pendingKey, optimistic);
     const records = applyEvent(get().records, optimistic);
     set({ events, records });
+    // Persist the pending event immediately so it survives a reload.
+    scheduleCacheWrite(get);
 
     // 2. Matrix PUT. On success, swap the pending key for the real id.
+    //    On failure, leave the pending event in place; flushPending()
+    //    will retry on /sync resume, on the `online` event, and on
+    //    a periodic tick.
     try {
       const { event_id } = await sendEvent(
         session,
@@ -115,22 +126,58 @@ export const useEoStore = create<EoStore>((set, get) => ({
           agent: content.agent,
           ...(content.seq !== undefined ? { seq: content.seq } : {}),
         },
-        nextTxnId(),
+        txn_id,
       );
       const events2 = new Map(get().events);
       events2.delete(pendingKey);
       const settled: EoEvent = { ...content, event_id };
       events2.set(event_id, settled);
-      // Re-derive: applyEvent on the same site with the same ts is idempotent
-      // under last-writer-wins, so we don't have to rebuild from scratch.
       const records2 = applyEvent(get().records, settled);
       set({ events: events2, records: records2 });
       scheduleCacheWrite(get);
     } catch (e) {
-      // Leave the optimistic event in place but mark its failure visibly.
-      // The user sees the row; a retry primitive will come in a follow-up.
-      console.warn('[eo-store] dispatch failed:', e);
-      throw e;
+      console.warn('[eo-store] dispatch failed (will retry):', e);
+    }
+  },
+
+  async flushPending() {
+    const { session, roomId, events } = get();
+    if (!session || !roomId) return;
+    // Snapshot the pending list so concurrent dispatches don't trip us.
+    const pendings = Array.from(events.values()).filter((e) => e.pending && e.txn_id);
+    for (const p of pendings) {
+      try {
+        const { event_id } = await sendEvent(
+          session,
+          roomId,
+          EO_RECORD_TYPE,
+          {
+            operator: p.operator,
+            site: p.site,
+            resolution: p.resolution,
+            ts: p.ts,
+            agent: p.agent,
+            ...(p.seq !== undefined ? { seq: p.seq } : {}),
+          },
+          p.txn_id!,
+        );
+        const cur = get().events;
+        if (!cur.has(p.event_id!)) continue; // user cleared it meanwhile
+        const events2 = new Map(cur);
+        events2.delete(p.event_id!);
+        const settled: EoEvent = {
+          operator: p.operator, site: p.site, resolution: p.resolution,
+          ts: p.ts, agent: p.agent, event_id,
+          ...(p.seq !== undefined ? { seq: p.seq } : {}),
+        };
+        events2.set(event_id, settled);
+        const records2 = applyEvent(get().records, settled);
+        set({ events: events2, records: records2 });
+        scheduleCacheWrite(get);
+      } catch {
+        // Server still unreachable. Stop here — next tick will try again.
+        return;
+      }
     }
   },
 
@@ -142,13 +189,14 @@ export const useEoStore = create<EoStore>((set, get) => ({
       roomId,
       accessToken: session.accessToken,
     });
-    if (!cached || cached.length === 0) return false;
+    if (!cached) return false;
+    const combined = [...cached.acked, ...cached.pending];
+    if (combined.length === 0) return false;
+    // Sort ascending so the fold sees them in causal order.
+    combined.sort((a, b) => a.ts - b.ts);
     const events = new Map<string, EoEvent>();
     let records = new Map<string, Record_>();
-    // Sort ascending so the fold sees them in causal order even if the
-    // serialized order was different.
-    cached.sort((a, b) => a.ts - b.ts);
-    for (const ev of cached) {
+    for (const ev of combined) {
       if (ev.event_id) events.set(ev.event_id, ev);
       records = applyEvent(records, ev);
     }
