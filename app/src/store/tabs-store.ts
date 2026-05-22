@@ -74,7 +74,6 @@ const VIEW_TITLES: Record<View, string> = {
   multiuser: 'Multi-user test',
   api: 'API connections',
   members: 'Members',
-  branch: 'Branches',
   nl: 'Natural language',
 };
 
@@ -89,7 +88,6 @@ const VIEW_ICONS: Record<View, string> = {
   multiuser: '\u2690',      // ⚐
   api: '\u29C9',            // ⧉
   members: '\u2736',        // ✶
-  branch: '\u22A2',         // ⊢
   nl: '\u2045',             // ⁅
 };
 
