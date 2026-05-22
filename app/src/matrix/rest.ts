@@ -261,3 +261,74 @@ let txnCounter = Date.now();
 export function nextTxnId(): string {
   return 'eo_' + (txnCounter++).toString(36) + '_' + Math.random().toString(36).slice(2, 8);
 }
+
+// ── /sync long-poll ──────────────────────────────────────────────────────
+
+/**
+ * Subscribe to live timeline updates for a single room via Matrix `/sync`
+ * long-polling. The first call uses an initial-sync filter that asks for
+ * exactly one room, no presence, no account data, no to-device. Subsequent
+ * calls pass the `next_batch` token and a 30-second timeout, so each call
+ * blocks until the server has something to deliver or the timeout elapses.
+ *
+ * Returns an `unsubscribe()` — sets a stop flag the next loop iteration
+ * checks. In-flight long-polls are NOT aborted; they'll time out on their
+ * own within `timeout` ms.
+ *
+ * `onEvents` is called with the room's timeline events for each `/sync`
+ * tick. Events may include the caller's own echoes — the store dedups by
+ * `event_id`.
+ */
+export function subscribeRoom(
+  session: Session,
+  roomId: string,
+  onEvents: (events: MatrixTimelineEvent[]) => void,
+  onError?: (e: unknown) => void,
+): () => void {
+  let stopped = false;
+  let since: string | undefined = undefined;
+  const filter = JSON.stringify({
+    room: {
+      rooms: [roomId],
+      timeline: { limit: 50 },
+      state: { types: [] },
+      ephemeral: { types: [] },
+      account_data: { types: [] },
+    },
+    presence: { types: [] },
+    account_data: { types: [] },
+  });
+
+  (async function loop() {
+    while (!stopped) {
+      try {
+        const params = new URLSearchParams();
+        params.set('filter', filter);
+        if (since) {
+          params.set('since', since);
+          params.set('timeout', '30000');
+        }
+        const data = await mx<SyncResponse>(session, 'GET', '/sync?' + params.toString());
+        since = data.next_batch;
+        const room = data.rooms?.join?.[roomId];
+        const events = room?.timeline?.events ?? [];
+        if (events.length > 0 && !stopped) onEvents(events);
+      } catch (e) {
+        if (stopped) break;
+        onError?.(e);
+        // Back off briefly before retrying so a sustained failure doesn't
+        // hammer the server.
+        await new Promise((r) => setTimeout(r, 2000));
+      }
+    }
+  })();
+
+  return () => { stopped = true; };
+}
+
+interface SyncResponse {
+  next_batch: string;
+  rooms?: {
+    join?: Record<string, { timeline?: { events?: MatrixTimelineEvent[] } }>;
+  };
+}

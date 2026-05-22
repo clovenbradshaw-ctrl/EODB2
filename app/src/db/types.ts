@@ -44,6 +44,12 @@ export interface EoEvent extends EoEventContent {
   origin_server_ts?: number;
   /** Local optimistic state: true until the Matrix PUT ack lands. */
   pending?: boolean;
+  /**
+   * Per-device Matrix txn id, set on pending events so a retry can re-PUT
+   * with the same txn id — Matrix dedups by (sender, txn_id) and will
+   * return the existing event_id instead of creating a duplicate.
+   */
+  txn_id?: string;
 }
 
 /** A media event references an mxc:// URI with integrity metadata. */

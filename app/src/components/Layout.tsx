@@ -4,6 +4,7 @@ import {
   resolveAlias,
   joinRoom,
   createRoom,
+  subscribeRoom,
   MatrixError,
   type Session,
 } from '../matrix/rest';
@@ -11,6 +12,7 @@ import { CollectionSidebar } from './CollectionSidebar';
 import { RecordList } from './RecordList';
 import { RecordDrawer } from './RecordDrawer';
 import { clearSession } from '../lib/session';
+import { clearCache } from '../db/cache';
 
 interface Props {
   session: Session;
@@ -30,7 +32,8 @@ function defaultAlias(session: Session): string {
 }
 
 export function Layout({ session, onLogout }: Props) {
-  const { roomId, setRoom, setSession, hydrate, hydrating, hydrated, hydrateError, reset } = useEoStore();
+  const { roomId, setRoom, setSession, loadFromCache, hydrate, hydrating, hydrated, hydrateError, applyRemote, flushPending, reset } = useEoStore();
+  const [liveError, setLiveError] = useState<string | null>(null);
   const [resolveError, setResolveError] = useState<string | null>(null);
   const [selectedSite, setSelectedSite] = useState<string | null>(null);
   const [selectedCollection, setSelectedCollection] = useState<string | null>(null);
@@ -66,13 +69,56 @@ export function Layout({ session, onLogout }: Props) {
     })();
   }, [session, setSession, setRoom]);
 
-  // Cold-start hydrate once a room is known.
+  // Cold-start: try OPFS cache first for instant paint, then hydrate
+  // from Matrix in the background to catch up on anything we missed.
   useEffect(() => {
     if (!roomId) return;
-    void hydrate();
-  }, [roomId, hydrate]);
+    let cancelled = false;
+    (async () => {
+      await loadFromCache();
+      if (cancelled) return;
+      void hydrate();
+    })();
+    return () => { cancelled = true; };
+  }, [roomId, loadFromCache, hydrate]);
+
+  // After hydration completes, start a /sync subscription so the store
+  // picks up live writes (from this device's other tabs and from other
+  // users in the same room).
+  useEffect(() => {
+    if (!roomId || !hydrated) return;
+    setLiveError(null);
+    const stop = subscribeRoom(
+      session,
+      roomId,
+      (events) => {
+        applyRemote(events);
+        // Each successful /sync tick means the server is reachable —
+        // a good moment to retry any pending writes.
+        void flushPending();
+      },
+      (err) => {
+        const msg = err instanceof MatrixError ? `${err.status} ${err.message}` : String((err as any)?.message ?? err);
+        setLiveError(msg);
+      },
+    );
+    // Also retry pending events whenever the browser flips back online,
+    // and once on mount in case we cached pending writes from a prior
+    // session that never reached the server.
+    void flushPending();
+    const onOnline = () => { void flushPending(); };
+    window.addEventListener('online', onOnline);
+    return () => { stop(); window.removeEventListener('online', onOnline); };
+  }, [session, roomId, hydrated, applyRemote, flushPending]);
 
   function logout() {
+    if (roomId) {
+      void clearCache({
+        userId: session.userId,
+        roomId,
+        accessToken: session.accessToken,
+      });
+    }
     reset();
     clearSession();
     onLogout();
@@ -97,6 +143,7 @@ export function Layout({ session, onLogout }: Props) {
         <main style={styles.main}>
           {resolveError && <div style={styles.error}>Room resolve failed: {resolveError}</div>}
           {hydrateError && <div style={styles.error}>Hydrate failed: {hydrateError}</div>}
+          {liveError && <div style={styles.error}>Live updates degraded: {liveError}</div>}
           {!roomId && !resolveError && <div style={styles.status}>Resolving room…</div>}
           {roomId && hydrating && !hydrated && <div style={styles.status}>Hydrating from Matrix…</div>}
           {roomId && hydrated && (
