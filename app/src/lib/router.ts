@@ -4,17 +4,15 @@ import { useState, useEffect, useCallback, useRef } from 'react';
 // Types
 // ---------------------------------------------------------------------------
 
-export type View = 'records' | 'log' | 'graph' | 'import' | 'settings' | 'builder' | 'messages' | 'people' | 'multiuser' | 'api' | 'members' | 'branch' | 'nl';
+export type View = 'records' | 'log' | 'graph' | 'import' | 'settings' | 'messages' | 'people' | 'multiuser' | 'api' | 'members' | 'nl';
 
-const VIEWS = new Set<string>(['records', 'log', 'graph', 'import', 'settings', 'builder', 'messages', 'people', 'multiuser', 'api', 'members', 'branch', 'nl']);
+const VIEWS = new Set<string>(['records', 'log', 'graph', 'import', 'settings', 'messages', 'people', 'multiuser', 'api', 'members', 'nl']);
 
 export interface AppRoute {
   view: View;
   space: string | null;           // space target e.g. 'space_amino'
   scope: string | null;          // full dot-path e.g. 'tblClients'
   record: string | null;         // full dot-path e.g. 'tblClients.rec123'
-  builderViewId: string | null;  // UUID when editing a builder view
-  customPageId: string | null;   // slug or ID when viewing a custom page live
   query: Record<string, string>;
 }
 
@@ -23,8 +21,6 @@ const DEFAULT_ROUTE: AppRoute = {
   space: null,
   scope: null,
   record: null,
-  builderViewId: null,
-  customPageId: null,
   query: {},
 };
 
@@ -93,26 +89,6 @@ export function parseHash(hash: string): AppRoute {
       continue;
     }
 
-    if (seg === 'p' && i + 1 < segments.length) {
-      // Custom page: /p/{slug}
-      route.customPageId = segments[i + 1];
-      route.view = 'builder';
-      i += 2;
-      continue;
-    }
-
-    if (seg === 'builder') {
-      route.view = 'builder';
-      // Optional: /builder/{viewId}
-      if (i + 1 < segments.length && !['t', 'r', 'p'].includes(segments[i + 1])) {
-        route.builderViewId = segments[i + 1];
-        i += 2;
-      } else {
-        i += 1;
-      }
-      continue;
-    }
-
     // System view
     if (VIEWS.has(seg)) {
       route.view = seg as View;
@@ -139,26 +115,18 @@ export function serializeRoute(route: AppRoute): string {
     ordered.push('s', route.space);
   }
 
-  if (route.customPageId) {
-    ordered.push('p', route.customPageId);
-  } else if (route.builderViewId) {
-    ordered.push('builder', route.builderViewId);
-  } else if (route.view === 'builder') {
-    ordered.push('builder');
-  } else {
-    // System view (omit 'records' as default)
-    if (route.view !== 'records') {
-      ordered.push(route.view);
-    }
+  // System view (omit 'records' as default)
+  if (route.view !== 'records') {
+    ordered.push(route.view);
+  }
 
-    if (route.scope) {
-      ordered.push('t', route.scope);
-    }
+  if (route.scope) {
+    ordered.push('t', route.scope);
+  }
 
-    if (route.record && route.scope) {
-      const recSeg = route.record.replace(`${route.scope}.`, '');
-      ordered.push('r', recSeg);
-    }
+  if (route.record && route.scope) {
+    const recSeg = route.record.replace(`${route.scope}.`, '');
+    ordered.push('r', recSeg);
   }
 
   let hash = '#/' + ordered.join('/');
@@ -205,8 +173,6 @@ export function useHashRoute() {
       if (!('scope' in partial)) next.scope = null;
       if (!('record' in partial)) next.record = null;
       if (!('view' in partial)) next.view = 'records';
-      if (!('builderViewId' in partial)) next.builderViewId = null;
-      if (!('customPageId' in partial)) next.customPageId = null;
     }
     if ('scope' in partial && partial.scope !== current.scope) {
       if (!('record' in partial)) next.record = null;

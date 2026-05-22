@@ -8,10 +8,6 @@ import { MatrixRoomsViewer } from './MatrixRoomsViewer';
 import { UserRoomsBySpaces } from './UserRoomsBySpaces';
 import { OP_COLORS, TRIAD_LABELS } from './LogView';
 import { ArchivedSpacesSection } from './ArchivedSpaces';
-import { AirtableSettingsSection } from './AirtableSettings';
-import { SeedSpaceSection } from './SeedSpaceSection';
-import { BlockListSection } from './BlockListSection';
-import { isAminoHomeserver } from '../lib/matrix-domain';
 import { buildSettingChangeEvent } from '../lib/settings-events';
 import { SettingsActivity } from './SettingsActivity';
 
@@ -36,10 +32,6 @@ interface SettingsViewProps {
 
 export function SettingsView({ session, matrixClient, roomId, spaceRooms, onUnarchive, connectionState, connectionError, matrixReady, onRetry, onLogout }: SettingsViewProps) {
   const { theme } = useTheme();
-  // Calendar / Airtable are tied to shared n8n proxy credentials on the
-  // hosted Amino deployment. Only surface those sections for users logged
-  // into app.aminoimmigration.com.
-  const isAmino = isAminoHomeserver(session.homeserver);
   const lastSeq = useEoStore((s) => s.lastSeq);
   const recentEvents = useEoStore((s) => s.recentEvents);
   const store = useEoStore((s) => s.store);
@@ -316,34 +308,6 @@ export function SettingsView({ session, matrixClient, roomId, spaceRooms, onUnar
         {onUnarchive && (
           <Section title="Archived Spaces" theme={theme}>
             <ArchivedSpacesSection onUnarchive={onUnarchive} />
-          </Section>
-        )}
-
-        {/* Seed this space — upload a .eodb to bootstrap this room. */}
-        <Section title="Seed this Space" theme={theme}>
-          <SeedSpaceSection
-            matrixClient={matrixClient}
-            roomId={roomId}
-            collectionId={roomId}
-          />
-        </Section>
-
-        {/* Uploaded blocks — list + per-block enable/disable. */}
-        <Section title="Uploaded Blocks" theme={theme}>
-          <BlockListSection
-            matrixClient={matrixClient}
-            roomId={roomId}
-          />
-        </Section>
-
-        {/* Airtable Importer — amino deployment only */}
-        {isAmino && (
-          <Section title="Airtable Importer" theme={theme}>
-            <AirtableSettingsSection
-              session={session}
-              matrixClient={matrixClient}
-              roomId={roomId}
-            />
           </Section>
         )}
 

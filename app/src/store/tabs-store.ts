@@ -14,8 +14,6 @@ export interface Tab {
   space: string | null;
   scope: string | null;
   record: string | null;
-  builderViewId: string | null;
-  customPageId: string | null;
   query: Record<string, string>;
   /** Human-readable title shown on the tab. Recomputed on route change. */
   title: string;
@@ -71,13 +69,11 @@ const VIEW_TITLES: Record<View, string> = {
   graph: 'Graph',
   import: 'Import',
   settings: 'Settings',
-  builder: 'Builder',
   messages: 'Messages',
   people: 'People',
   multiuser: 'Multi-user test',
   api: 'API connections',
   members: 'Members',
-  branch: 'Branches',
   nl: 'Natural language',
 };
 
@@ -87,13 +83,11 @@ const VIEW_ICONS: Record<View, string> = {
   graph: '\u25C8',          // ◈
   import: '\u2935',         // ⤵
   settings: '\u2699',       // ⚙
-  builder: '\u25A3',        // ▣
   messages: '\u2709',       // ✉
   people: '\u2689',         // ⚉
   multiuser: '\u2690',      // ⚐
   api: '\u29C9',            // ⧉
   members: '\u2736',        // ✶
-  branch: '\u22A2',         // ⊢
   nl: '\u2045',             // ⁅
 };
 
@@ -121,8 +115,6 @@ function routeFromTab(tab: Tab): AppRoute {
     space: tab.space,
     scope: tab.scope,
     record: tab.record,
-    builderViewId: tab.builderViewId,
-    customPageId: tab.customPageId,
     query: tab.query,
   };
 }
@@ -137,8 +129,6 @@ function tabFromRoute(
     space: route.space ?? null,
     scope: route.scope ?? null,
     record: route.record ?? null,
-    builderViewId: route.builderViewId ?? null,
-    customPageId: route.customPageId ?? null,
     query: route.query ?? {},
     title: meta?.title ?? defaultTitleFor(route),
     icon: meta?.icon ?? defaultIconFor(route),
@@ -148,16 +138,12 @@ function tabFromRoute(
 export { routeFromTab, tabFromRoute };
 
 /** Tab identity for "reuse" logic — two tabs are "the same place" when
- * their view+space+scope (and for builder, view-id/page-id) match. */
+ * their view+space+scope match. */
 function sameIdentity(t: Tab, r: Partial<AppRoute>): boolean {
   if (t.view !== (r.view ?? 'records')) return false;
   if ((r.space ?? null) !== null && t.space !== r.space) return false;
   if (t.view === 'records') {
     if ((r.scope ?? null) !== t.scope) return false;
-  }
-  if (t.view === 'builder') {
-    if ((r.builderViewId ?? null) !== t.builderViewId) return false;
-    if ((r.customPageId ?? null) !== t.customPageId) return false;
   }
   return true;
 }
@@ -211,12 +197,6 @@ export const useTabsStore = create<TabsState>((set, get) => ({
           ...(partial.space !== undefined ? { space: partial.space } : {}),
           ...(partial.scope !== undefined ? { scope: partial.scope } : {}),
           ...(partial.record !== undefined ? { record: partial.record } : {}),
-          ...(partial.builderViewId !== undefined
-            ? { builderViewId: partial.builderViewId }
-            : {}),
-          ...(partial.customPageId !== undefined
-            ? { customPageId: partial.customPageId }
-            : {}),
           ...(partial.query !== undefined ? { query: partial.query } : {}),
         };
         // Recompute title/icon from the new route unless this tab was

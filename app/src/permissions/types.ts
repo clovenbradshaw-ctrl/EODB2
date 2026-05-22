@@ -178,13 +178,9 @@ export interface SchemaManifest {
  */
 export interface PersonaHome {
   /** Which top-level view to land on. */
-  view: 'records' | 'builder' | 'graph' | 'log' | 'messages' | 'people' | 'members' | 'api' | 'import' | 'settings';
+  view: 'records' | 'graph' | 'log' | 'messages' | 'people' | 'members' | 'api' | 'import' | 'settings';
   /** Optional default scope (table full path) when landing. */
   scope?: string;
-  /** If view === 'builder', the specific builder page to open. */
-  builderViewId?: string;
-  /** If view === 'builder' and using a slug-addressable custom page. */
-  customPageId?: string;
 }
 
 /** A user type definition, created by admins per-space. */
