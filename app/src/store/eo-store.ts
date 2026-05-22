@@ -2,6 +2,7 @@ import { create } from 'zustand';
 import type { EoEvent, Record_ } from '../db/types';
 import { EO_RECORD_TYPE } from '../db/types';
 import { applyEvent } from '../db/fold';
+import { loadCache, saveCache } from '../db/cache';
 import {
   type Session,
   type MatrixTimelineEvent,
@@ -10,6 +11,23 @@ import {
   nextTxnId,
   MatrixError,
 } from '../matrix/rest';
+
+/** Debounce window for OPFS cache writes. Bursts of dispatches coalesce. */
+const CACHE_DEBOUNCE_MS = 500;
+
+let cacheTimer: ReturnType<typeof setTimeout> | null = null;
+function scheduleCacheWrite(get: () => { session: Session | null; roomId: string | null; events: Map<string, EoEvent> }) {
+  if (cacheTimer) clearTimeout(cacheTimer);
+  cacheTimer = setTimeout(() => {
+    cacheTimer = null;
+    const { session, roomId, events } = get();
+    if (!session || !roomId) return;
+    void saveCache(
+      { userId: session.userId, roomId, accessToken: session.accessToken },
+      Array.from(events.values()),
+    );
+  }, CACHE_DEBOUNCE_MS);
+}
 
 /**
  * The single state slice — events, materialized snapshot, room/session,
@@ -43,6 +61,10 @@ interface EoStore {
 
   /** Optimistically apply an event, then PUT it to Matrix. */
   dispatch(content: Omit<EoEvent, 'event_id' | 'pending' | 'origin_server_ts'>): Promise<void>;
+
+  /** Read the OPFS cache (if any). Sets hydrated=true on a cache hit so
+   * the UI paints instantly; hydrate() runs after to fill in fresh events. */
+  loadFromCache(): Promise<boolean>;
 
   /** Cold-start hydration: paginate /messages → fold → done. */
   hydrate(): Promise<void>;
@@ -103,12 +125,35 @@ export const useEoStore = create<EoStore>((set, get) => ({
       // under last-writer-wins, so we don't have to rebuild from scratch.
       const records2 = applyEvent(get().records, settled);
       set({ events: events2, records: records2 });
+      scheduleCacheWrite(get);
     } catch (e) {
       // Leave the optimistic event in place but mark its failure visibly.
       // The user sees the row; a retry primitive will come in a follow-up.
       console.warn('[eo-store] dispatch failed:', e);
       throw e;
     }
+  },
+
+  async loadFromCache() {
+    const { session, roomId } = get();
+    if (!session || !roomId) return false;
+    const cached = await loadCache({
+      userId: session.userId,
+      roomId,
+      accessToken: session.accessToken,
+    });
+    if (!cached || cached.length === 0) return false;
+    const events = new Map<string, EoEvent>();
+    let records = new Map<string, Record_>();
+    // Sort ascending so the fold sees them in causal order even if the
+    // serialized order was different.
+    cached.sort((a, b) => a.ts - b.ts);
+    for (const ev of cached) {
+      if (ev.event_id) events.set(ev.event_id, ev);
+      records = applyEvent(records, ev);
+    }
+    set({ events, records, hydrated: true });
+    return true;
   },
 
   async hydrate() {
@@ -144,15 +189,17 @@ export const useEoStore = create<EoStore>((set, get) => ({
         if (!page.end || page.chunk.length === 0) break;
         from = page.end;
       }
-      // Sort ascending by ts so the fold sees them in causal order.
-      all.sort((a, b) => a.ts - b.ts);
-      const events = new Map<string, EoEvent>();
-      let records = new Map<string, Record_>();
+      // Merge with anything already loaded (e.g. from OPFS cache). Sort
+      // the combined set ascending by ts so the fold sees causal order.
+      const events = new Map(get().events);
       for (const ev of all) {
-        if (ev.event_id) events.set(ev.event_id, ev);
-        records = applyEvent(records, ev);
+        if (ev.event_id && !events.has(ev.event_id)) events.set(ev.event_id, ev);
       }
+      const merged = Array.from(events.values()).sort((a, b) => a.ts - b.ts);
+      let records = new Map<string, Record_>();
+      for (const ev of merged) records = applyEvent(records, ev);
       set({ events, records, hydrating: false, hydrated: true });
+      scheduleCacheWrite(get);
     } catch (e: any) {
       const msg = e instanceof MatrixError ? `${e.status} ${e.message}` : String(e?.message ?? e);
       set({ hydrating: false, hydrateError: msg });
@@ -183,7 +230,10 @@ export const useEoStore = create<EoStore>((set, get) => ({
       records = applyEvent(records, ev);
       changed = true;
     }
-    if (changed) set({ events, records });
+    if (changed) {
+      set({ events, records });
+      scheduleCacheWrite(get);
+    }
   },
 
   reset() {

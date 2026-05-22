@@ -12,6 +12,7 @@ import { CollectionSidebar } from './CollectionSidebar';
 import { RecordList } from './RecordList';
 import { RecordDrawer } from './RecordDrawer';
 import { clearSession } from '../lib/session';
+import { clearCache } from '../db/cache';
 
 interface Props {
   session: Session;
@@ -31,7 +32,7 @@ function defaultAlias(session: Session): string {
 }
 
 export function Layout({ session, onLogout }: Props) {
-  const { roomId, setRoom, setSession, hydrate, hydrating, hydrated, hydrateError, applyRemote, reset } = useEoStore();
+  const { roomId, setRoom, setSession, loadFromCache, hydrate, hydrating, hydrated, hydrateError, applyRemote, reset } = useEoStore();
   const [liveError, setLiveError] = useState<string | null>(null);
   const [resolveError, setResolveError] = useState<string | null>(null);
   const [selectedSite, setSelectedSite] = useState<string | null>(null);
@@ -68,11 +69,18 @@ export function Layout({ session, onLogout }: Props) {
     })();
   }, [session, setSession, setRoom]);
 
-  // Cold-start hydrate once a room is known.
+  // Cold-start: try OPFS cache first for instant paint, then hydrate
+  // from Matrix in the background to catch up on anything we missed.
   useEffect(() => {
     if (!roomId) return;
-    void hydrate();
-  }, [roomId, hydrate]);
+    let cancelled = false;
+    (async () => {
+      await loadFromCache();
+      if (cancelled) return;
+      void hydrate();
+    })();
+    return () => { cancelled = true; };
+  }, [roomId, loadFromCache, hydrate]);
 
   // After hydration completes, start a /sync subscription so the store
   // picks up live writes (from this device's other tabs and from other
@@ -93,6 +101,13 @@ export function Layout({ session, onLogout }: Props) {
   }, [session, roomId, hydrated, applyRemote]);
 
   function logout() {
+    if (roomId) {
+      void clearCache({
+        userId: session.userId,
+        roomId,
+        accessToken: session.accessToken,
+      });
+    }
     reset();
     clearSession();
     onLogout();
