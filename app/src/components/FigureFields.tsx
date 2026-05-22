@@ -7,7 +7,6 @@ import { formatName } from './scope-picker-utils';
 import { useTheme, type Theme } from '../theme';
 import { ContextMenu, type ContextMenuItem } from './ContextMenu';
 import { useIdResolver, isEntityId, isEntityIdArray, type IdResolver } from '../hooks/useIdResolver';
-import { syncEditToAirtable } from '../ingestion/airtable-writeback';
 import { getAirtableTypeIcon, getAirtableTypeColor } from './field-type-icons';
 import { groupSchemaStates, extractEdgeAttrDefs } from '../db/schema-rules';
 import { LinkFieldPicker } from './LinkFieldPicker';
@@ -228,12 +227,6 @@ export function FigureFields({ figure, onNavigate, profileFields, recordTs, allE
           revertedFromAgent: entry.agent,
         },
       });
-      syncEditToAirtable({
-        target: figure.target,
-        fieldKey,
-        value: entry.value,
-        getStateByPrefix,
-      }).catch(console.warn);
     } catch { /* ignore */ }
   }
 
@@ -297,7 +290,6 @@ export function FigureFields({ figure, onNavigate, profileFields, recordTs, allE
         ts: new Date().toISOString(),
         acquired_ts: new Date().toISOString(),
       });
-      syncEditToAirtable({ target: figure.target, fieldKey, value: parsed, getStateByPrefix }).catch(console.warn);
     } catch { /* ignore */ }
   }
 
@@ -337,14 +329,6 @@ export function FigureFields({ figure, onNavigate, profileFields, recordTs, allE
       ts: new Date().toISOString(),
       acquired_ts: new Date().toISOString(),
     });
-    // For Airtable-origin records, push the edit back so the two systems
-    // don't diverge. Fire-and-forget — local state is already updated.
-    syncEditToAirtable({
-      target: figure.target,
-      fieldKey,
-      value: updatedIds,
-      getStateByPrefix,
-    }).catch(console.warn);
   }
 
   return (

@@ -43,7 +43,6 @@ import {
   type KeyHealRequest,
   type KeyHealResponse,
 } from '../crypto/key-delivery';
-import { useAirtableStore } from '../ingestion/airtable-store';
 import { resolveDataRoom } from '../matrix/event-bridge';
 import { configureMatrixDomain, isAminoHomeserver } from '../lib/matrix-domain';
 import { HolonNav } from './HolonNav';
@@ -56,7 +55,6 @@ import { useIsMobile, useIsTablet, useIsNarrow } from '../hooks/useIsMobile';
 import { formatName } from './scope-picker-utils';
 import { ConnectionStatus, useConnectionState, type ConnectionState } from './ConnectionStatus';
 import { SyncToast, useSyncToast } from './SyncToast';
-import { AirtableSyncBadge } from './AirtableSyncBadge';
 import { ErrorBoundary } from './ErrorBoundary';
 import { PressureBadge } from './PressureBadge';
 import { SyncProgress } from './SyncProgress';
@@ -129,7 +127,6 @@ import { EO_POWER_LEVEL_CONTENT } from '../permissions/types';
 import { listAllHomeserverUsers } from '../matrix/user-discovery';
 import { withRetry, withTimeout, TimeoutError } from '../matrix/connection-resilience';
 import { invalidateStatsCache } from '../db/space-statistics';
-import { useApiConnectionStore } from '../store/api-connection-store';
 
 /** Set to false to disable all Matrix activity (sync, room creation, discovery). */
 const MATRIX_ENABLED = true;
@@ -779,7 +776,6 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
     const canonical = normalizeSpaceTarget(target);
     // Hardwall: purge all caches not scoped to a space before loading new space data.
     invalidateStatsCache();
-    useApiConnectionStore.getState().reset();
     setSelectedSpace(canonical);
     localStorage.setItem('eo-selected-space', canonical);
     // Clear route state when switching spaces — space is now part of the URL
@@ -2858,7 +2854,6 @@ export function Layout({ session, onLogout, localMode }: LayoutProps) {
             </div>
           )}
           {!isMobile && <SyncToast status={syncToastStatus} seq={syncToastSeq} />}
-          {!isMobile && isAmino && <AirtableSyncBadge />}
           {selectedSpace && !isMobile && (
             <PermissionBadge role={currentRole} displayName={displayName} />
           )}
