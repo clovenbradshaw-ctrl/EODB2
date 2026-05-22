@@ -4,6 +4,7 @@ import {
   resolveAlias,
   joinRoom,
   createRoom,
+  subscribeRoom,
   MatrixError,
   type Session,
 } from '../matrix/rest';
@@ -30,7 +31,8 @@ function defaultAlias(session: Session): string {
 }
 
 export function Layout({ session, onLogout }: Props) {
-  const { roomId, setRoom, setSession, hydrate, hydrating, hydrated, hydrateError, reset } = useEoStore();
+  const { roomId, setRoom, setSession, hydrate, hydrating, hydrated, hydrateError, applyRemote, reset } = useEoStore();
+  const [liveError, setLiveError] = useState<string | null>(null);
   const [resolveError, setResolveError] = useState<string | null>(null);
   const [selectedSite, setSelectedSite] = useState<string | null>(null);
   const [selectedCollection, setSelectedCollection] = useState<string | null>(null);
@@ -72,6 +74,24 @@ export function Layout({ session, onLogout }: Props) {
     void hydrate();
   }, [roomId, hydrate]);
 
+  // After hydration completes, start a /sync subscription so the store
+  // picks up live writes (from this device's other tabs and from other
+  // users in the same room).
+  useEffect(() => {
+    if (!roomId || !hydrated) return;
+    setLiveError(null);
+    const stop = subscribeRoom(
+      session,
+      roomId,
+      (events) => applyRemote(events),
+      (err) => {
+        const msg = err instanceof MatrixError ? `${err.status} ${err.message}` : String((err as any)?.message ?? err);
+        setLiveError(msg);
+      },
+    );
+    return stop;
+  }, [session, roomId, hydrated, applyRemote]);
+
   function logout() {
     reset();
     clearSession();
@@ -97,6 +117,7 @@ export function Layout({ session, onLogout }: Props) {
         <main style={styles.main}>
           {resolveError && <div style={styles.error}>Room resolve failed: {resolveError}</div>}
           {hydrateError && <div style={styles.error}>Hydrate failed: {hydrateError}</div>}
+          {liveError && <div style={styles.error}>Live updates degraded: {liveError}</div>}
           {!roomId && !resolveError && <div style={styles.status}>Resolving room…</div>}
           {roomId && hydrating && !hydrated && <div style={styles.status}>Hydrating from Matrix…</div>}
           {roomId && hydrated && (

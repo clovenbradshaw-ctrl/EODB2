@@ -4,6 +4,7 @@ import { EO_RECORD_TYPE } from '../db/types';
 import { applyEvent } from '../db/fold';
 import {
   type Session,
+  type MatrixTimelineEvent,
   sendEvent,
   getMessages,
   nextTxnId,
@@ -45,6 +46,9 @@ interface EoStore {
 
   /** Cold-start hydration: paginate /messages → fold → done. */
   hydrate(): Promise<void>;
+
+  /** Apply timeline events arriving from /sync. Idempotent by event_id. */
+  applyRemote(events: MatrixTimelineEvent[]): void;
 
   /** Reset all in-memory state. Used on logout. */
   reset(): void;
@@ -153,6 +157,33 @@ export const useEoStore = create<EoStore>((set, get) => ({
       const msg = e instanceof MatrixError ? `${e.status} ${e.message}` : String(e?.message ?? e);
       set({ hydrating: false, hydrateError: msg });
     }
+  },
+
+  applyRemote(timeline) {
+    let events = get().events;
+    let records = get().records;
+    let changed = false;
+    for (const tl of timeline) {
+      if (tl.type !== EO_RECORD_TYPE) continue;
+      if (!tl.event_id || events.has(tl.event_id)) continue;
+      const c = tl.content;
+      if (!c || typeof c.site !== 'string') continue;
+      const ev: EoEvent = {
+        operator: c.operator,
+        site: c.site,
+        resolution: c.resolution ?? {},
+        ts: typeof c.ts === 'number' ? c.ts : tl.origin_server_ts,
+        agent: c.agent ?? tl.sender,
+        event_id: tl.event_id,
+        origin_server_ts: tl.origin_server_ts,
+        ...(typeof c.seq === 'number' ? { seq: c.seq } : {}),
+      };
+      if (!changed) { events = new Map(events); }
+      events.set(tl.event_id, ev);
+      records = applyEvent(records, ev);
+      changed = true;
+    }
+    if (changed) set({ events, records });
   },
 
   reset() {
