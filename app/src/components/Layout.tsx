@@ -20,15 +20,15 @@ interface Props {
 }
 
 /**
- * One canonical room per user. Lives in localStorage as
- * `eodb2_room_id:<userId>`. On first run we try to join (or create) the
- * canonical alias `#eodb2-{localpart}:{homeserver}`.
+ * One shared canonical room for all users. Resolved from alias
+ * `#eodb2:{homeserver}`. The first signed-in user creates it; subsequent
+ * users must be invited (room is private_chat). Resolved room id is
+ * cached per-user in localStorage as `eodb2_room_id:<userId>`.
  */
 function roomKey(userId: string) { return `eodb2_room_id:${userId}`; }
 function defaultAlias(session: Session): string {
-  const localpart = session.userId.replace(/^@/, '').split(':')[0];
   const server = session.homeserver.replace(/^https?:\/\//, '').replace(/\/+$/, '');
-  return `#eodb2-${localpart}:${server}`;
+  return `#eodb2:${server}`;
 }
 
 export function Layout({ session, onLogout }: Props) {
