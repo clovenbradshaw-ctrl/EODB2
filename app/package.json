@@ -13,6 +13,7 @@
   },
   "dependencies": {
     "@matrix-org/matrix-sdk-crypto-wasm": "^18.3.0",
+    "matrix-encrypt-attachment": "^1.0.3",
     "matrix-js-sdk": "^34.13.0",
     "react": "^18.3.0",
     "react-dom": "^18.3.0",

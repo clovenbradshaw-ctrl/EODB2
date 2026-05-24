@@ -15,6 +15,11 @@
 import * as sdk from 'matrix-js-sdk';
 import { ClientEvent, MatrixEventEvent, RoomEvent } from 'matrix-js-sdk';
 import type { MatrixEvent, Room } from 'matrix-js-sdk';
+import {
+  encryptAttachment,
+  decryptAttachment,
+  type IEncryptedFile,
+} from 'matrix-encrypt-attachment';
 import { getClient } from './client';
 
 export interface Session {
@@ -300,22 +305,60 @@ export function subscribeRoom(
 
 // ── Media ────────────────────────────────────────────────────────────────
 
+/**
+ * `EncryptedFile` shape as stored in event content per the Matrix spec —
+ * the upload helper returns this with `url` populated to the mxc:// URI
+ * the server returned. Caller persists it as the source of truth for the
+ * attachment (key + iv + hashes + url).
+ */
+export type EncryptedFile = IEncryptedFile & { url: string };
+
+/**
+ * Encrypt and upload an attachment. The plaintext bytes are AES-CTR
+ * encrypted in the browser (per matrix.org's encrypted-attachments spec)
+ * before being POSTed to the media repo, so the homeserver only ever sees
+ * ciphertext. Returns both the mxc URI and the full `EncryptedFile`
+ * metadata (key, iv, hashes) — store the metadata in the event content
+ * and pass it to `downloadEncryptedMedia` to decrypt later.
+ */
 export async function uploadMedia(
   session: Session,
   data: Uint8Array,
   contentType: string,
   filename?: string,
-): Promise<{ content_uri: string }> {
+): Promise<{ content_uri: string; file: EncryptedFile }> {
+  void contentType; // ciphertext is opaque; stored content_type lives in the event content
   const c = await getClient(session);
   try {
-    const blob = new Blob([data as BlobPart], { type: contentType });
-    const r = await c.uploadContent(blob, { type: contentType, name: filename });
-    return { content_uri: r.content_uri };
+    const plaintext = data.buffer.slice(
+      data.byteOffset,
+      data.byteOffset + data.byteLength,
+    ) as ArrayBuffer;
+    const { data: ciphertext, info } = await encryptAttachment(plaintext);
+    // The ciphertext is opaque bytes — Matrix media repos don't care about
+    // the declared content-type but we send octet-stream to make the
+    // server-side opacity explicit. The original content_type is preserved
+    // separately in the event content by the caller.
+    const blob = new Blob([ciphertext as BlobPart], {
+      type: 'application/octet-stream',
+    });
+    const r = await c.uploadContent(blob, {
+      type: 'application/octet-stream',
+      name: filename,
+    });
+    return {
+      content_uri: r.content_uri,
+      file: { ...info, url: r.content_uri },
+    };
   } catch (e) {
     throw adaptError(e);
   }
 }
 
+/**
+ * Download an attachment via raw mxc URI (plaintext). Kept for backward
+ * compatibility with attachments uploaded before encrypted media landed.
+ */
 export async function downloadMedia(
   session: Session,
   mxcUri: string,
@@ -328,4 +371,36 @@ export async function downloadMedia(
   });
   if (!resp.ok) throw new MatrixError(resp.status, undefined, resp.statusText);
   return resp;
+}
+
+/**
+ * Fetch an encrypted attachment by its `EncryptedFile` metadata and
+ * decrypt it client-side. Returns a Response wrapping the decrypted bytes
+ * so callers can `.blob()` it identically to `downloadMedia`.
+ */
+export async function downloadEncryptedMedia(
+  session: Session,
+  file: EncryptedFile,
+  contentType?: string,
+): Promise<Response> {
+  const c = await getClient(session);
+  const httpUrl = c.mxcUrlToHttp(file.url, undefined, undefined, undefined, undefined, true, true);
+  if (!httpUrl) throw new MatrixError(0, undefined, 'Invalid mxc:// URI: ' + file.url);
+  const resp = await fetch(httpUrl, {
+    headers: { Authorization: 'Bearer ' + session.accessToken },
+  });
+  if (!resp.ok) throw new MatrixError(resp.status, undefined, resp.statusText);
+  const ciphertext = await resp.arrayBuffer();
+  try {
+    const plaintext = await decryptAttachment(ciphertext, file);
+    return new Response(plaintext, {
+      headers: contentType ? { 'Content-Type': contentType } : undefined,
+    });
+  } catch (e) {
+    throw new MatrixError(
+      0,
+      'M_DECRYPTION_FAILED',
+      'Failed to decrypt attachment: ' + (e instanceof Error ? e.message : String(e)),
+    );
+  }
 }
