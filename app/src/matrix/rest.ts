@@ -187,6 +187,16 @@ export async function joinRoom(session: Session, roomIdOrAlias: string): Promise
   return data.room_id;
 }
 
+export async function inviteUser(
+  session: Session,
+  roomId: string,
+  userId: string,
+): Promise<void> {
+  await mx(session, 'POST', `/rooms/${encodeURIComponent(roomId)}/invite`, {
+    user_id: userId,
+  });
+}
+
 export async function createRoom(
   session: Session,
   opts: { aliasLocalpart?: string; name?: string; topic?: string },

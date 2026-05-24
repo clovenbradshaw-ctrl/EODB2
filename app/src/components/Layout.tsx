@@ -4,6 +4,7 @@ import {
   resolveAlias,
   joinRoom,
   createRoom,
+  inviteUser,
   subscribeRoom,
   MatrixError,
   type Session,
@@ -111,6 +112,24 @@ export function Layout({ session, onLogout }: Props) {
     return () => { stop(); window.removeEventListener('online', onOnline); };
   }, [session, roomId, hydrated, applyRemote, flushPending]);
 
+  async function invite() {
+    if (!roomId) return;
+    const raw = window.prompt('Invite user (full Matrix ID, e.g. @alice:app.aminoimmigration.com):');
+    if (!raw) return;
+    const userId = raw.trim();
+    if (!userId.startsWith('@') || !userId.includes(':')) {
+      window.alert('Expected a full Matrix ID starting with @ and including :homeserver');
+      return;
+    }
+    try {
+      await inviteUser(session, roomId, userId);
+      window.alert(`Invited ${userId}`);
+    } catch (e) {
+      const msg = e instanceof MatrixError ? `${e.status} ${e.message}` : String((e as any)?.message ?? e);
+      window.alert(`Invite failed: ${msg}`);
+    }
+  }
+
   function logout() {
     if (roomId) {
       void clearCache({
@@ -130,6 +149,7 @@ export function Layout({ session, onLogout }: Props) {
         <div style={styles.brand}>EO///DB</div>
         <div style={styles.userInfo}>
           <span style={styles.userId}>{session.userId}</span>
+          <button style={styles.linkBtn} onClick={invite} disabled={!roomId}>Invite</button>
           <button style={styles.linkBtn} onClick={logout}>Sign out</button>
         </div>
       </header>
