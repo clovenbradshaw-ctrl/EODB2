@@ -1,6 +1,11 @@
 import { useEffect, useMemo, useState } from 'react';
 import { useEoStore } from '../store/eo-store';
-import { uploadMedia, downloadMedia } from '../matrix/rest';
+import {
+  uploadMedia,
+  downloadMedia,
+  downloadEncryptedMedia,
+  type EncryptedFile,
+} from '../matrix/rest';
 
 interface Props {
   site: string;
@@ -14,6 +19,8 @@ interface Attachment {
   size: number;
   content_type?: string;
   sha256?: string;
+  /** When present, the attachment is E2EE — decrypt via `downloadEncryptedMedia`. */
+  file?: EncryptedFile;
   ts: number;
   cleared?: boolean;
 }
@@ -59,6 +66,7 @@ export function RecordDrawer({ site, onClose }: Props) {
         size: typeof r.size === 'number' ? r.size : 0,
         content_type: r.content_type,
         sha256: r.sha256,
+        file: r.file && typeof r.file === 'object' ? (r.file as EncryptedFile) : undefined,
         ts: rec.last_ts,
         cleared: rec.cleared,
       });
@@ -114,7 +122,7 @@ export function RecordDrawer({ site, onClose }: Props) {
       const buf = await file.arrayBuffer();
       const data = new Uint8Array(buf);
       const sha = await sha256Hex(buf);
-      const { content_uri } = await uploadMedia(
+      const { content_uri, file: encFile } = await uploadMedia(
         session,
         data,
         file.type || 'application/octet-stream',
@@ -128,6 +136,7 @@ export function RecordDrawer({ site, onClose }: Props) {
         site: attachSite,
         resolution: {
           mxc_uri: content_uri,
+          file: encFile,
           filename: file.name,
           content_type: file.type || 'application/octet-stream',
           size: file.size,
@@ -147,7 +156,9 @@ export function RecordDrawer({ site, onClose }: Props) {
   async function downloadAttachment(att: Attachment) {
     if (!session) return;
     try {
-      const resp = await downloadMedia(session, att.mxc_uri);
+      const resp = att.file
+        ? await downloadEncryptedMedia(session, att.file, att.content_type)
+        : await downloadMedia(session, att.mxc_uri);
       const blob = await resp.blob();
       const url = URL.createObjectURL(blob);
       const a = document.createElement('a');
