@@ -10,6 +10,14 @@ import {
 import { ins, def, seg, getNamespace } from '../foundation/operators.js';
 import { EventStore } from '../foundation/store.js';
 import { getClient } from '../foundation/client.js';
+import {
+  addField,
+  getTypeFields,
+  type FieldSchema,
+  type FieldType,
+} from '../schema';
+import { AddColumnForm } from './AddColumnForm';
+import { Cell } from './Cell';
 
 interface Props {
   room: AppRoom;
@@ -19,9 +27,9 @@ interface Props {
 
 const DELETED_PARTITION = 'deleted';
 
-// The SDK fires Timeline events for its own local-echo placeholders
-// (event_id starts with "~") before the server accepts them. We skip
-// those — the real echo arrives via /sync once the server has the event.
+// SDK fires Timeline for its own placeholders (event_id starts with "~")
+// before the server accepts the send. Skip those — the real echo arrives
+// via /sync with a real event id.
 function isPlaceholder(event: unknown): boolean {
   const get = (event as { getId?: () => string | null }).getId;
   const eventId = typeof get === 'function' ? get.call(event) : (event as { event_id?: string }).event_id;
@@ -29,17 +37,12 @@ function isPlaceholder(event: unknown): boolean {
 }
 
 export function TableView({ room, userId, onLog }: Props) {
-  // committedState is folded from real events (store + server). The fold
-  // mutates in place for speed, so we bump a version counter to force
-  // re-render rather than swapping the reference.
   const stateRef = useRef<FoldState>(initial());
   const storeRef = useRef<EventStore | null>(null);
   const [version, setVersion] = useState(0);
   const [loading, setLoading] = useState(true);
 
   const [entityType, setEntityType] = useState('record');
-  const [extraColumns, setExtraColumns] = useState<string[]>([]);
-  const [newColumn, setNewColumn] = useState('');
   const [editing, setEditing] = useState<{
     anchor: string;
     path: string;
@@ -52,7 +55,6 @@ export function TableView({ room, userId, onLog }: Props) {
     stateRef.current = initial();
     setVersion(0);
     setLoading(true);
-    setExtraColumns([]);
     setEditing(null);
 
     (async () => {
@@ -61,7 +63,6 @@ export function TableView({ room, userId, onLog }: Props) {
       storeRef.current = store;
       if (cancelled) return;
 
-      // Replay everything we have locally first — instant render, offline-safe.
       try {
         const stored = await store.getAll();
         foldFrom(stateRef.current, stored);
@@ -72,8 +73,6 @@ export function TableView({ room, userId, onLog }: Props) {
         onLog(`Local replay failed: ${e instanceof Error ? e.message : String(e)}`, 'error');
       }
 
-      // Then ask the server for events since the store's cursor. Best-effort:
-      // an offline boot just shows the local replay.
       try {
         const cursor = store.getCursor();
         const { newEvents } = await loadTimelineSince(roomId, cursor);
@@ -89,11 +88,6 @@ export function TableView({ room, userId, onLog }: Props) {
           `Server sync deferred (offline?): ${e instanceof Error ? e.message : String(e)}`,
         );
       }
-
-      // From here, live events flow through the store before folding so
-      // dedup + persistence happen in one place.
-      const client = getClient();
-      if (!client) return;
     })();
 
     const unsubLive = onTimeline(roomId, async (event) => {
@@ -127,6 +121,8 @@ export function TableView({ room, userId, onLog }: Props) {
     };
   }, [room.roomId, onLog]);
 
+  void getClient; // referenced inside async wiring above; keep import alive for d.ts
+
   const state = stateRef.current;
 
   const rows: Entity[] = useMemo(() => {
@@ -138,25 +134,41 @@ export function TableView({ room, userId, onLog }: Props) {
     return list;
   }, [state, entityType, version]);
 
-  const columns: string[] = useMemo(() => {
-    const set = new Set<string>();
+  // Columns come from three places: explicit schema (defSchema events),
+  // ad-hoc keys actually present on rows, and the schema-implied order.
+  // Schema fields render first; ad-hoc keys (legacy / pre-schema rows)
+  // append after them so nothing is hidden.
+  const schemaFields: FieldSchema[] = useMemo(() => {
+    void version;
+    return getTypeFields(state, entityType);
+  }, [state, entityType, version]);
+
+  const columns: FieldSchema[] = useMemo(() => {
+    const byName = new Map<string, FieldSchema>();
+    for (const f of schemaFields) byName.set(f.name, f);
+    let nextOrder = schemaFields.length;
     for (const row of rows) {
       for (const key of Object.keys(row)) {
-        if (!key.startsWith('_')) set.add(key);
+        if (key.startsWith('_')) continue;
+        if (!byName.has(key)) {
+          byName.set(key, { name: key, type: 'text', order: nextOrder++ });
+        }
       }
     }
-    for (const col of extraColumns) set.add(col);
-    return Array.from(set).sort();
-  }, [rows, extraColumns]);
+    return Array.from(byName.values()).sort(
+      (a, b) => a.order - b.order || a.name.localeCompare(b.name),
+    );
+  }, [rows, schemaFields]);
 
   const distinctTypes = useMemo(() => {
     void version;
     const set = new Set<string>();
     for (const e of Object.values(state.entities)) {
-      if (state.partitions[e._anchor] !== DELETED_PARTITION) {
-        set.add(e._type);
-      }
+      if (state.partitions[e._anchor] !== DELETED_PARTITION) set.add(e._type);
     }
+    // Also surface types that exist only in schema, so a freshly-defined
+    // type with no rows still appears in the picker.
+    for (const t of Object.keys(state.schema || {})) set.add(t);
     set.add(entityType);
     return Array.from(set).sort();
   }, [state, entityType, version]);
@@ -177,27 +189,32 @@ export function TableView({ room, userId, onLog }: Props) {
     }
   };
 
-  const handleAddColumn = () => {
-    const name = newColumn.trim();
-    if (!name) return;
-    if (name.startsWith('_')) {
-      onLog('Column names cannot start with underscore', 'error');
-      return;
-    }
-    setExtraColumns((prev) => (prev.includes(name) ? prev : [...prev, name]));
-    setNewColumn('');
+  const handleAddColumn = async (spec: {
+    name: string;
+    type: FieldType;
+    options?: string[];
+  }) => {
+    await addField(room.roomId, entityType, spec.name, {
+      type: spec.type,
+      options: spec.options,
+      order: columns.length,
+    });
   };
 
-  const commitEdit = async () => {
+  const commitEdit = async (parsed: unknown) => {
     if (!editing) return;
-    const { anchor, path, value } = editing;
+    const { anchor, path } = editing;
     setEditing(null);
     try {
-      let parsed: unknown = value;
-      const trimmed = value.trim();
-      if (trimmed === 'true' || trimmed === 'false') parsed = trimmed === 'true';
-      else if (trimmed !== '' && !Number.isNaN(Number(trimmed))) parsed = Number(trimmed);
       await def(room.roomId, anchor, path, parsed);
+    } catch (e) {
+      onLog(e instanceof Error ? e.message : String(e), 'error');
+    }
+  };
+
+  const toggleCheckbox = async (anchor: string, path: string, currentlyChecked: boolean) => {
+    try {
+      await def(room.roomId, anchor, path, !currentlyChecked);
     } catch (e) {
       onLog(e instanceof Error ? e.message : String(e), 'error');
     }
@@ -221,15 +238,7 @@ export function TableView({ room, userId, onLog }: Props) {
           </select>
         </label>
         <button onClick={handleAddRow}>+ Row</button>
-        <input
-          placeholder="New column"
-          value={newColumn}
-          onChange={(e) => setNewColumn(e.target.value)}
-          onKeyDown={(e) => {
-            if (e.key === 'Enter') handleAddColumn();
-          }}
-        />
-        <button onClick={handleAddColumn}>+ Column</button>
+        <AddColumnForm onAdd={handleAddColumn} onLog={onLog} />
         <span className="dim small">
           {rows.length} row(s) · {state.cursor ? new Date(state.cursor).toLocaleString() : '—'}
         </span>
@@ -241,7 +250,10 @@ export function TableView({ room, userId, onLog }: Props) {
             <tr>
               <th className="anchor-col">anchor</th>
               {columns.map((c) => (
-                <th key={c}>{c}</th>
+                <th key={c.name}>
+                  {c.name}
+                  <span className="col-type">{c.type}</span>
+                </th>
               ))}
               <th className="row-actions" />
             </tr>
@@ -259,51 +271,33 @@ export function TableView({ room, userId, onLog }: Props) {
                 <td className="anchor-col dim">{row._anchor}</td>
                 {columns.map((c) => {
                   const isEditing =
-                    editing && editing.anchor === row._anchor && editing.path === c;
-                  const raw = row[c];
-                  const display =
-                    raw === undefined || raw === null
-                      ? ''
-                      : typeof raw === 'object'
-                        ? JSON.stringify(raw)
-                        : String(raw);
+                    !!editing && editing.anchor === row._anchor && editing.path === c.name;
+                  const raw = row[c.name];
                   return (
-                    <td
-                      key={c}
-                      onClick={() => {
-                        if (!isEditing) {
-                          setEditing({ anchor: row._anchor, path: c, value: display });
-                        }
+                    <Cell
+                      key={c.name}
+                      field={c}
+                      value={raw}
+                      editing={isEditing}
+                      draft={isEditing ? editing!.value : ''}
+                      onStartEdit={() => {
+                        const display =
+                          raw === undefined || raw === null
+                            ? ''
+                            : typeof raw === 'object'
+                              ? JSON.stringify(raw)
+                              : String(raw);
+                        setEditing({ anchor: row._anchor, path: c.name, value: display });
                       }}
-                    >
-                      {isEditing ? (
-                        <input
-                          autoFocus
-                          value={editing!.value}
-                          onChange={(e) =>
-                            setEditing({
-                              anchor: row._anchor,
-                              path: c,
-                              value: e.target.value,
-                            })
-                          }
-                          onBlur={() => {
-                            void commitEdit();
-                          }}
-                          onKeyDown={(e) => {
-                            if (e.key === 'Enter') {
-                              void commitEdit();
-                            } else if (e.key === 'Escape') {
-                              setEditing(null);
-                            }
-                          }}
-                        />
-                      ) : (
-                        <span className="cell-value">
-                          {display || <span className="dim">—</span>}
-                        </span>
-                      )}
-                    </td>
+                      onChangeDraft={(next) =>
+                        setEditing({ anchor: row._anchor, path: c.name, value: next })
+                      }
+                      onCommit={(parsed) => void commitEdit(parsed)}
+                      onCancel={() => setEditing(null)}
+                      onToggle={() => {
+                        void toggleCheckbox(row._anchor, c.name, !!raw);
+                      }}
+                    />
                   );
                 })}
                 <td className="row-actions">
