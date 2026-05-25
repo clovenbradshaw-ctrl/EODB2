@@ -3,64 +3,9 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <meta http-equiv="Content-Security-Policy"
-          content="default-src 'self'; connect-src 'self' https: wss:; script-src 'self' 'wasm-unsafe-eval'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src https://fonts.gstatic.com; worker-src 'self';" />
-    <title>EO///DB</title>
     <link rel="icon" type="image/svg+xml" href="./favicon.svg" />
-    <link rel="apple-touch-icon" href="./pwa-192.png" />
-    <meta name="theme-color" content="#1a1a2e" />
-    <link rel="preconnect" href="https://fonts.googleapis.com" />
-    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
-    <link href="https://fonts.googleapis.com/css2?family=Geist:wght@400;500;600;700&family=Geist+Mono:wght@400;500&family=JetBrains+Mono:wght@300;400;500;600&family=Source+Serif+4:opsz,wght@8..60,300;8..60,400;8..60,600&family=Outfit:wght@200;300;400;500;600;700&display=swap" rel="stylesheet" />
-    <style>
-      * { margin: 0; padding: 0; box-sizing: border-box; }
-      @keyframes spin { to { transform: rotate(360deg); } }
-      @keyframes fadeIn { from { opacity: 0; transform: translateY(4px); } to { opacity: 1; transform: translateY(0); } }
-      ::-webkit-scrollbar { width: 6px; height: 6px; }
-      ::-webkit-scrollbar-track { background: transparent; }
-      ::-webkit-scrollbar-thumb { background: #d6d1c2; border-radius: 3px; }
-      ::-webkit-scrollbar-thumb:hover { background: #c4bda8; }
-      [data-theme="dark"] ::-webkit-scrollbar-thumb { background: #30363d; }
-      [data-theme="dark"] ::-webkit-scrollbar-thumb:hover { background: #484f58; }
-      /* Smooth global transitions */
-      html { scroll-behavior: smooth; }
-      button:focus-visible { outline: 2px solid #4f55c9; outline-offset: 2px; }
-      [data-theme="dark"] button:focus-visible { outline-color: #58a6ff; }
-      input:focus-visible { outline: 2px solid #4f55c9; outline-offset: -1px; }
-      [data-theme="dark"] input:focus-visible { outline-color: #58a6ff; }
-      /* Selection color */
-      ::selection { background: rgba(79, 85, 201, 0.15); }
-      [data-theme="dark"] ::selection { background: rgba(88, 166, 255, 0.2); }
-
-      /* Touch-friendly targets on mobile */
-      @media (max-width: 768px) {
-        button, [role="button"] { min-height: 36px; }
-        input, select, textarea { font-size: 16px; } /* Prevent iOS zoom on focus */
-      }
-
-      /* Tablet adjustments */
-      @media (min-width: 769px) and (max-width: 1024px) {
-        ::-webkit-scrollbar { width: 4px; height: 4px; }
-      }
-
-      /* Airtable-style column header interactions */
-      th:hover .col-header-chevron { opacity: 1 !important; }
-      th:hover { background-color: #ece9e4 !important; }
-      [data-theme="dark"] th:hover { background-color: #21262d !important; }
-
-      /* Reduce motion for users who prefer it */
-      @media (prefers-reduced-motion: reduce) {
-        *, *::before, *::after {
-          animation-duration: 0.01ms !important;
-          transition-duration: 0.01ms !important;
-        }
-        html { scroll-behavior: auto; }
-      }
-    </style>
-    <script type="module" crossorigin src="./assets/index-BDo2KBEz.js"></script>
-    <link rel="modulepreload" crossorigin href="./assets/matrix-sdk-BxdHBrJm.js">
-    <link rel="modulepreload" crossorigin href="./assets/react-vendor-DDAhbTOQ.js">
-    <link rel="stylesheet" crossorigin href="./assets/index-CKmh3jBe.css">
+    <title>EO///DB</title>
+    <script type="module" crossorigin src="./assets/index-Dl7QwYRG.js"></script>
   </head>
   <body>
     <div id="root"></div>
