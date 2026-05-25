@@ -19,6 +19,9 @@ import {
 import { AddColumnForm } from './AddColumnForm';
 import { Cell } from './Cell';
 import { RecordDrawer } from './RecordDrawer';
+import { KanbanView } from './KanbanView';
+
+type ViewKind = 'grid' | 'kanban';
 
 interface Props {
   room: AppRoom;
@@ -44,6 +47,8 @@ export function TableView({ room, userId, onLog }: Props) {
   const [loading, setLoading] = useState(true);
 
   const [entityType, setEntityType] = useState('record');
+  const [viewKind, setViewKind] = useState<ViewKind>('grid');
+  const [kanbanField, setKanbanField] = useState<string | null>(null);
   const [editing, setEditing] = useState<{
     anchor: string;
     path: string;
@@ -59,6 +64,8 @@ export function TableView({ room, userId, onLog }: Props) {
     setLoading(true);
     setEditing(null);
     setSelectedAnchor(null);
+    setViewKind('grid');
+    setKanbanField(null);
 
     (async () => {
       const store = new EventStore(roomId, getNamespace());
@@ -227,6 +234,15 @@ export function TableView({ room, userId, onLog }: Props) {
     return <div className="empty">Loading {room.name}…</div>;
   }
 
+  const moveKanban = async (anchor: string, toGroup: string | null) => {
+    if (!kanbanField) return;
+    try {
+      await def(room.roomId, anchor, kanbanField, toGroup);
+    } catch (e) {
+      onLog(e instanceof Error ? e.message : String(e), 'error');
+    }
+  };
+
   return (
     <div className="table-view">
       <div className="toolbar">
@@ -240,13 +256,43 @@ export function TableView({ room, userId, onLog }: Props) {
             ))}
           </select>
         </label>
+        <div className="view-tabs" role="tablist">
+          <button
+            role="tab"
+            aria-selected={viewKind === 'grid'}
+            className={viewKind === 'grid' ? 'active' : ''}
+            onClick={() => setViewKind('grid')}
+          >
+            Grid
+          </button>
+          <button
+            role="tab"
+            aria-selected={viewKind === 'kanban'}
+            className={viewKind === 'kanban' ? 'active' : ''}
+            onClick={() => setViewKind('kanban')}
+          >
+            Kanban
+          </button>
+        </div>
         <button onClick={handleAddRow}>+ Row</button>
-        <AddColumnForm onAdd={handleAddColumn} onLog={onLog} />
+        {viewKind === 'grid' && <AddColumnForm onAdd={handleAddColumn} onLog={onLog} />}
         <span className="dim small">
           {rows.length} row(s) · {state.cursor ? new Date(state.cursor).toLocaleString() : '—'}
         </span>
       </div>
 
+      {viewKind === 'kanban' && (
+        <KanbanView
+          rows={rows}
+          fields={columns}
+          groupField={kanbanField}
+          onGroupFieldChange={setKanbanField}
+          onOpenRecord={setSelectedAnchor}
+          onMove={(a, g) => void moveKanban(a, g)}
+        />
+      )}
+
+      {viewKind === 'grid' && (
       <div className="table-scroll">
         <table>
           <thead>
@@ -327,6 +373,7 @@ export function TableView({ room, userId, onLog }: Props) {
           </tbody>
         </table>
       </div>
+      )}
 
       {state._undecryptable > 0 && (
         <div className="warning small">
