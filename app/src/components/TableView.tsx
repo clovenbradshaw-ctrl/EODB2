@@ -2,12 +2,14 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import { initial, foldFrom, type Entity, type FoldState } from '../foundation/fold.js';
 import {
   getTimeline,
-  loadFullTimeline,
+  loadTimelineSince,
   onDecrypted,
   onTimeline,
   type AppRoom,
 } from '../foundation/rooms.js';
-import { ins, def, seg } from '../foundation/operators.js';
+import { ins, def, seg, getNamespace } from '../foundation/operators.js';
+import { EventStore } from '../foundation/store.js';
+import { getClient } from '../foundation/client.js';
 
 interface Props {
   room: AppRoom;
@@ -17,11 +19,21 @@ interface Props {
 
 const DELETED_PARTITION = 'deleted';
 
+// The SDK fires Timeline events for its own local-echo placeholders
+// (event_id starts with "~") before the server accepts them. We skip
+// those — the real echo arrives via /sync once the server has the event.
+function isPlaceholder(event: unknown): boolean {
+  const get = (event as { getId?: () => string | null }).getId;
+  const eventId = typeof get === 'function' ? get.call(event) : (event as { event_id?: string }).event_id;
+  return typeof eventId === 'string' && eventId.startsWith('~');
+}
+
 export function TableView({ room, userId, onLog }: Props) {
-  // The fold mutates state in place for speed, so React doesn't see new refs.
-  // We bump a version counter on every event to force re-render; the state
-  // object is read fresh on each render.
+  // committedState is folded from real events (store + server). The fold
+  // mutates in place for speed, so we bump a version counter to force
+  // re-render rather than swapping the reference.
   const stateRef = useRef<FoldState>(initial());
+  const storeRef = useRef<EventStore | null>(null);
   const [version, setVersion] = useState(0);
   const [loading, setLoading] = useState(true);
 
@@ -34,7 +46,6 @@ export function TableView({ room, userId, onLog }: Props) {
     value: string;
   } | null>(null);
 
-  // Per-room: reset fold, hydrate from full timeline, subscribe to live events.
   useEffect(() => {
     const roomId = room.roomId;
     let cancelled = false;
@@ -45,38 +56,79 @@ export function TableView({ room, userId, onLog }: Props) {
     setEditing(null);
 
     (async () => {
+      const store = new EventStore(roomId, getNamespace());
+      await store.open();
+      storeRef.current = store;
+      if (cancelled) return;
+
+      // Replay everything we have locally first — instant render, offline-safe.
       try {
-        await loadFullTimeline(roomId);
+        const stored = await store.getAll();
+        foldFrom(stateRef.current, stored);
         if (cancelled) return;
-        const events = getTimeline(roomId);
-        foldFrom(stateRef.current, events);
         setLoading(false);
         setVersion((v) => v + 1);
       } catch (e) {
-        if (!cancelled) onLog(e instanceof Error ? e.message : String(e), 'error');
+        onLog(`Local replay failed: ${e instanceof Error ? e.message : String(e)}`, 'error');
       }
+
+      // Then ask the server for events since the store's cursor. Best-effort:
+      // an offline boot just shows the local replay.
+      try {
+        const cursor = store.getCursor();
+        const { newEvents } = await loadTimelineSince(roomId, cursor);
+        if (cancelled) return;
+        const fresh = newEvents.filter((e) => !isPlaceholder(e));
+        const added = await store.append(fresh);
+        if (added.length > 0) {
+          foldFrom(stateRef.current, added);
+          setVersion((v) => v + 1);
+        }
+      } catch (e) {
+        onLog(
+          `Server sync deferred (offline?): ${e instanceof Error ? e.message : String(e)}`,
+        );
+      }
+
+      // From here, live events flow through the store before folding so
+      // dedup + persistence happen in one place.
+      const client = getClient();
+      if (!client) return;
     })();
 
-    const unsubLive = onTimeline(roomId, (event) => {
-      foldFrom(stateRef.current, [event]);
-      setVersion((v) => v + 1);
+    const unsubLive = onTimeline(roomId, async (event) => {
+      if (cancelled) return;
+      if (isPlaceholder(event)) return;
+      const store = storeRef.current;
+      if (!store) return;
+      const added = await store.append([event]);
+      if (added.length > 0) {
+        foldFrom(stateRef.current, added);
+        setVersion((v) => v + 1);
+      }
     });
-    const unsubDecrypted = onDecrypted(roomId, (event) => {
-      foldFrom(stateRef.current, [event]);
-      setVersion((v) => v + 1);
+    const unsubDecrypted = onDecrypted(roomId, async (event) => {
+      if (cancelled) return;
+      if (isPlaceholder(event)) return;
+      const store = storeRef.current;
+      if (!store) return;
+      const added = await store.append([event]);
+      if (added.length > 0) {
+        foldFrom(stateRef.current, added);
+        setVersion((v) => v + 1);
+      }
     });
 
     return () => {
       cancelled = true;
       unsubLive();
       unsubDecrypted();
+      storeRef.current = null;
     };
   }, [room.roomId, onLog]);
 
   const state = stateRef.current;
 
-  // Entities of the selected type that aren't in the 'deleted' partition.
-  // The fold's state.partitions is anchor → partition name.
   const rows: Entity[] = useMemo(() => {
     void version;
     const list = Object.values(state.entities).filter(
@@ -86,9 +138,6 @@ export function TableView({ room, userId, onLog }: Props) {
     return list;
   }, [state, entityType, version]);
 
-  // Columns: union of all non-underscore payload keys across visible rows,
-  // plus any locally added columns the user wants to see even before they
-  // contain values.
   const columns: string[] = useMemo(() => {
     const set = new Set<string>();
     for (const row of rows) {
@@ -144,8 +193,6 @@ export function TableView({ room, userId, onLog }: Props) {
     const { anchor, path, value } = editing;
     setEditing(null);
     try {
-      // Parse simple JSON values so booleans / numbers round-trip cleanly,
-      // but fall back to a string so the user can type freeform text.
       let parsed: unknown = value;
       const trimmed = value.trim();
       if (trimmed === 'true' || trimmed === 'false') parsed = trimmed === 'true';
@@ -252,7 +299,9 @@ export function TableView({ room, userId, onLog }: Props) {
                           }}
                         />
                       ) : (
-                        <span className="cell-value">{display || <span className="dim">—</span>}</span>
+                        <span className="cell-value">
+                          {display || <span className="dim">—</span>}
+                        </span>
                       )}
                     </td>
                   );
@@ -277,9 +326,7 @@ export function TableView({ room, userId, onLog }: Props) {
           {state._undecryptable} undecrypted event(s) — waiting for keys.
         </div>
       )}
-      <div className="dim small">
-        You: {userId}
-      </div>
+      <div className="dim small">You: {userId}</div>
     </div>
   );
 }

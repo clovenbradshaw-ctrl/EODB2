@@ -27,6 +27,10 @@ export function onDecrypted(
   roomId: string,
   handler: (event: MatrixEvent) => void,
 ): () => void;
+export function onLocalEchoUpdated(
+  roomId: string,
+  handler: (event: MatrixEvent, oldEventId: string, oldStatus: string | null) => void,
+): () => void;
 export function loadTimelineSince(
   roomId: string,
   sinceTs: number,
@@ -36,3 +40,5 @@ export function invite(roomId: string, userId: string): Promise<void>;
 export function getMembers(
   roomId: string,
 ): Array<{ userId: string; displayName: string; membership: string }>;
+
+export { EventStatus } from 'matrix-js-sdk';

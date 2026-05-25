@@ -22,6 +22,20 @@ export function setNamespace(namespace: string): void;
 export function getNamespace(): string;
 export function eventType(op: Operator): string;
 export function parseEventType(type: string): Operator | null;
+
+export interface OptimisticEvent {
+  type: string;
+  content: Record<string, unknown>;
+  origin_server_ts: number;
+  sender: string;
+  event_id: string;
+  _pending: true;
+}
+
+export function setOptimisticHook(
+  fn: (payload: { roomId: string; event: OptimisticEvent }) => void,
+): void;
+
 export function emit(roomId: string, op: Operator, content: unknown): Promise<string>;
 export function ins(
   roomId: string,

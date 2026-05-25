@@ -4,3 +4,7 @@ export * from './fold';
 export * from './rooms';
 export * from './pack';
 export * from './store';
+export * from './vault';
+export * from './outbox';
+export * from './network';
+export * from './media';

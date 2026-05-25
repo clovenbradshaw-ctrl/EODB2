@@ -23,3 +23,4 @@ export class EventStore {
 
 export function listStoredRooms(): Promise<string[]>;
 export function getStorageUsage(): Promise<{ files: number; bytes: number }>;
+export function wipeAllRoomData(): Promise<void>;

@@ -128,6 +128,38 @@ select:focus {
   color: var(--accent);
   font-size: 11px;
 }
+.net-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 1.2px;
+  color: var(--text-dim);
+  padding: 2px 8px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+}
+.net-badge.online {
+  color: var(--green);
+  border-color: rgba(106, 154, 106, 0.3);
+}
+.net-badge.degraded {
+  color: var(--accent);
+  border-color: var(--accent-dim);
+}
+.net-badge.offline {
+  color: var(--red);
+  border-color: rgba(176, 96, 96, 0.4);
+}
+.net-pending {
+  background: var(--accent-dim);
+  color: var(--text-bright);
+  border-radius: 8px;
+  padding: 0 5px;
+  font-size: 9px;
+  margin-left: 2px;
+}
 
 .log {
   max-height: 90px;
