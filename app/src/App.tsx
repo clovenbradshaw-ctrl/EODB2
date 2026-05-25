@@ -1,122 +1,149 @@
-import { useState, useEffect, useRef } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
+import {
+  login,
+  logout,
+  restoreSession,
+  setProgress,
+  setRecoveryKeyDisplayer,
+  setRecoveryKeyProvider,
+  getClient,
+} from './foundation/client.js';
 import { Login } from './components/Login';
-import { Layout } from './components/Layout';
-import { ErrorBoundary } from './components/ErrorBoundary';
-import { restoreSession, type MatrixSession } from './matrix/client';
-import { useEoStore } from './store/eo-store';
-import { ThemeProvider, useTheme } from './theme';
+import { MainShell } from './components/MainShell';
+import { RecoveryDisplayModal, RecoveryEntryModal } from './components/RecoveryModals';
+import { Log } from './components/Log';
 
-/** Synthetic session used for local-only mode (no Matrix server). */
-const LOCAL_SESSION: MatrixSession = {
-  userId: '@local:localhost',
-  deviceId: 'local-device',
-  accessToken: '',
-  homeserver: 'http://localhost',
-};
+type Phase = 'initializing' | 'logged_out' | 'logging_in' | 'active';
+type LogEntry = { id: number; level: 'info' | 'error'; msg: string };
 
-function AppInner() {
-  return <AppMain />;
-}
-
-function AppMain() {
-  const [session, setSession] = useState<MatrixSession | null>(null);
-  const [localMode, setLocalMode] = useState(false);
-  const [loading, setLoading] = useState(true);
-  const teardown = useEoStore((s) => s.teardown);
-  const initLocal = useEoStore((s) => s.initLocal);
-  const { theme } = useTheme();
-
-  // Capture deep-link hash before login so we can restore it after auth
-  const pendingRedirect = useRef(window.location.hash || '');
-
-  useEffect(() => {
-    const saved = restoreSession();
-    if (saved) {
-      setSession(saved);
-    }
-    // Check if we were previously in local mode
-    if (localStorage.getItem('eo-local-mode') === '1') {
-      setLocalMode(true);
-      setSession(LOCAL_SESSION);
-    }
-    setLoading(false);
-  }, []);
-
-  function handleLogin(s: MatrixSession) {
-    setSession(s);
-    localStorage.removeItem('eo-local-mode');
-    setLocalMode(false);
-    // Restore the deep-link the user originally landed on — but only if it
-    // looks like a genuine in-app hash route, to avoid open-redirect or
-    // javascript:-scheme attacks via the URL fragment.
-    const pending = pendingRedirect.current;
-    if (pending && pending !== '#/' && /^#\/[A-Za-z0-9/_\-.?=&]*$/.test(pending)) {
-      window.location.hash = pending;
-    }
-  }
-
-  function handleLocalMode() {
-    localStorage.setItem('eo-local-mode', '1');
-    setLocalMode(true);
-    setSession(LOCAL_SESSION);
-    // Bootstrap the local store immediately
-    initLocal('local').catch((e) => console.warn('[EO-DB] Local store init failed:', e));
-  }
-
-  function handleLogout() {
-    teardown();
-    setSession(null);
-    setLocalMode(false);
-    localStorage.removeItem('eo-local-mode');
-  }
-
-  if (loading) {
-    return (
-      <div
-        role="status"
-        aria-live="polite"
-        style={{
-          display: 'flex',
-          flexDirection: 'column',
-          alignItems: 'center',
-          justifyContent: 'center',
-          minHeight: '100vh',
-          gap: 12,
-          color: theme.textSecondary,
-          fontFamily: "'JetBrains Mono', monospace",
-        }}
-      >
-        <span
-          style={{
-            width: 24,
-            height: 24,
-            border: `2px solid ${theme.border}`,
-            borderTopColor: theme.accent,
-            borderRadius: '50%',
-            animation: 'spin 0.8s linear infinite',
-            display: 'inline-block',
-          }}
-        />
-        <div style={{ fontSize: 13 }}>Loading data…</div>
-      </div>
-    );
-  }
-
-  if (!session) {
-    return <Login onLogin={handleLogin} onLocalMode={handleLocalMode} />;
-  }
-
-  return (
-    <ErrorBoundary>
-      <Layout session={session} onLogout={handleLogout} localMode={localMode} />
-    </ErrorBoundary>
-  );
-}
+let nextLogId = 1;
 
 export function App() {
+  const [phase, setPhase] = useState<Phase>('initializing');
+  const [user, setUser] = useState<{ userId: string; deviceId: string } | null>(null);
+  const [logs, setLogs] = useState<LogEntry[]>([]);
+  const [displayKey, setDisplayKey] = useState<{
+    key: string;
+    resolve: () => void;
+  } | null>(null);
+  const [entryRequest, setEntryRequest] = useState<{
+    resolve: (v: string | null) => void;
+  } | null>(null);
+
+  const append = useCallback((msg: string, level: LogEntry['level'] = 'info') => {
+    setLogs((prev) => {
+      const next = [...prev, { id: nextLogId++, level, msg }];
+      return next.length > 60 ? next.slice(next.length - 60) : next;
+    });
+  }, []);
+
+  // Wire foundation callbacks once. The progress hook drives the log panel;
+  // the recovery-key hooks open modals and resolve when the user dismisses.
+  const calledRef = useRef(false);
+  useEffect(() => {
+    if (calledRef.current) return;
+    calledRef.current = true;
+
+    setProgress((msg) => append(msg));
+    setRecoveryKeyDisplayer(
+      (key) =>
+        new Promise<void>((resolve) => {
+          setDisplayKey({ key, resolve });
+        }),
+    );
+    setRecoveryKeyProvider(
+      () =>
+        new Promise<string | null>((resolve) => {
+          setEntryRequest({ resolve });
+        }),
+    );
+
+    void (async () => {
+      try {
+        const c = await restoreSession();
+        if (c) {
+          setUser({ userId: c.getUserId() ?? '', deviceId: c.getDeviceId() ?? '' });
+          setPhase('active');
+        } else {
+          setPhase('logged_out');
+        }
+      } catch (e) {
+        append(e instanceof Error ? e.message : String(e), 'error');
+        setPhase('logged_out');
+      }
+    })();
+  }, [append]);
+
+  const handleLogin = useCallback(
+    async (homeserver: string, username: string, password: string) => {
+      setPhase('logging_in');
+      try {
+        const res = await login(homeserver, username, password);
+        setUser({ userId: res.userId, deviceId: res.deviceId });
+        setPhase('active');
+      } catch (e) {
+        append(e instanceof Error ? e.message : String(e), 'error');
+        setPhase('logged_out');
+      }
+    },
+    [append],
+  );
+
+  const handleLogout = useCallback(async () => {
+    await logout();
+    setUser(null);
+    setPhase('logged_out');
+  }, []);
+
   return (
-    <ThemeProvider>
-      <AppInner />
-    </ThemeProvider>
+    <div className="app">
+      <header className="app-header">
+        <h1>
+          EO<span className="dim">///</span>DB
+        </h1>
+        <span className="tag">rooms as tables · events as rows · fold as query</span>
+        {phase === 'active' && user && (
+          <div className="header-right">
+            <span className="user">{user.userId}</span>
+            <button className="ghost" onClick={handleLogout}>
+              Logout
+            </button>
+          </div>
+        )}
+      </header>
+
+      <Log entries={logs} />
+
+      {phase === 'initializing' && <div className="boot">Restoring session…</div>}
+
+      {phase === 'logged_out' && <Login onSubmit={handleLogin} />}
+
+      {phase === 'logging_in' && <div className="boot">Connecting…</div>}
+
+      {phase === 'active' && user && (
+        <MainShell userId={user.userId} client={getClient()} onLog={append} />
+      )}
+
+      {displayKey && (
+        <RecoveryDisplayModal
+          recoveryKey={displayKey.key}
+          onAcknowledge={() => {
+            const { resolve } = displayKey;
+            setDisplayKey(null);
+            resolve();
+          }}
+        />
+      )}
+
+      {entryRequest && (
+        <RecoveryEntryModal
+          onSubmit={(value) => {
+            const { resolve } = entryRequest;
+            setEntryRequest(null);
+            resolve(value);
+          }}
+        />
+      )}
+    </div>
   );
 }
