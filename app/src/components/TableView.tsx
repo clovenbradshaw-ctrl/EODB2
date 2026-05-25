@@ -18,6 +18,7 @@ import {
 } from '../schema';
 import { AddColumnForm } from './AddColumnForm';
 import { Cell } from './Cell';
+import { RecordDrawer } from './RecordDrawer';
 
 interface Props {
   room: AppRoom;
@@ -48,6 +49,7 @@ export function TableView({ room, userId, onLog }: Props) {
     path: string;
     value: string;
   } | null>(null);
+  const [selectedAnchor, setSelectedAnchor] = useState<string | null>(null);
 
   useEffect(() => {
     const roomId = room.roomId;
@@ -56,6 +58,7 @@ export function TableView({ room, userId, onLog }: Props) {
     setVersion(0);
     setLoading(true);
     setEditing(null);
+    setSelectedAnchor(null);
 
     (async () => {
       const store = new EventStore(roomId, getNamespace());
@@ -248,6 +251,7 @@ export function TableView({ room, userId, onLog }: Props) {
         <table>
           <thead>
             <tr>
+              <th className="row-expand" />
               <th className="anchor-col">anchor</th>
               {columns.map((c) => (
                 <th key={c.name}>
@@ -261,13 +265,22 @@ export function TableView({ room, userId, onLog }: Props) {
           <tbody>
             {rows.length === 0 && (
               <tr>
-                <td colSpan={columns.length + 2} className="empty-row">
+                <td colSpan={columns.length + 3} className="empty-row">
                   No rows yet. Click + Row to start.
                 </td>
               </tr>
             )}
             {rows.map((row) => (
               <tr key={row._anchor}>
+                <td className="row-expand">
+                  <button
+                    className="ghost small"
+                    title="Open record"
+                    onClick={() => setSelectedAnchor(row._anchor)}
+                  >
+                    ▷
+                  </button>
+                </td>
                 <td className="anchor-col dim">{row._anchor}</td>
                 {columns.map((c) => {
                   const isEditing =
@@ -321,6 +334,22 @@ export function TableView({ room, userId, onLog }: Props) {
         </div>
       )}
       <div className="dim small">You: {userId}</div>
+
+      {selectedAnchor && state.entities[selectedAnchor] && (
+        <RecordDrawer
+          entity={state.entities[selectedAnchor]}
+          fields={columns}
+          onCommit={async (path, value) => {
+            try {
+              await def(room.roomId, selectedAnchor, path, value);
+            } catch (e) {
+              onLog(e instanceof Error ? e.message : String(e), 'error');
+            }
+          }}
+          onDelete={() => void handleDelete(selectedAnchor)}
+          onClose={() => setSelectedAnchor(null)}
+        />
+      )}
     </div>
   );
 }
