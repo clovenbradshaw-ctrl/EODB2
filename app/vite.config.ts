@@ -10,5 +10,15 @@ export default defineConfig({
     outDir: '../docs',
     emptyOutDir: true,
     target: 'esnext',
+    rollupOptions: {
+      output: {
+        manualChunks: {
+          'matrix-sdk': ['matrix-js-sdk'],
+        },
+      },
+    },
+  },
+  optimizeDeps: {
+    exclude: ['@matrix-org/matrix-sdk-crypto-wasm'],
   },
 });

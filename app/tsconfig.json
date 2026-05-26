@@ -6,17 +6,14 @@
     "moduleResolution": "bundler",
     "jsx": "react-jsx",
     "strict": true,
-    "noUnusedLocals": true,
-    "noUnusedParameters": true,
-    "noFallthroughCasesInSwitch": true,
-    "noUncheckedIndexedAccess": false,
     "esModuleInterop": true,
-    "isolatedModules": true,
     "skipLibCheck": true,
+    "forceConsistentCasingInFileNames": true,
     "resolveJsonModule": true,
-    "allowImportingTsExtensions": false,
+    "isolatedModules": true,
     "noEmit": true,
-    "types": ["vitest/globals"]
+    "allowJs": true,
+    "checkJs": false
   },
-  "include": ["src", "vite.config.ts", "vitest.config.ts"]
+  "include": ["src"]
 }

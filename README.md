@@ -1,15 +1,50 @@
 # EODB2
 
-A Matrix-backed, event-sourced database app — rebuilt from the floor up.
+A Matrix-backed, event-sourced database app. Pure client-side: no server.
+All data lives in Matrix room events on `app.aminoimmigration.com`.
 
-EODB2 is a pure client-side app. There's no server. All data lives in
-Matrix room events on the user's homeserver. Each event is an EO record
-(operator + site + resolution); the client folds the timeline into the
-materialized state shown in the UI.
+## Architecture
 
-This is **v2**, rebuilt from the sanity-check (`docs/sanity-check.html`)
-that proved Matrix is a sufficient transport. v1 is preserved on the
-`archive/v1` branch.
+```
+┌─────────────────────────────────────────────┐
+│             React app (App.tsx)             │
+├─────────────────────────────────────────────┤
+│            src/foundation/                  │
+│   operators   │   fold                       │
+│   emit(INS/…) │   state = fold(events)       │
+│   rooms       │   client                     │
+│   create/…    │   auth · sync · E2EE         │
+│   pack        │   store                      │
+│   binary log  │   OPFS persistence           │
+├─────────────────────────────────────────────┤
+│         matrix-js-sdk + Rust Crypto         │
+├─────────────────────────────────────────────┤
+│              Matrix Homeserver              │
+└─────────────────────────────────────────────┘
+```
+
+Everything below `src/foundation/` is the bare-metal substrate. Everything
+above it is the app. The foundation was ported from
+[bare-metal-eo-matrix-app](https://github.com/clovenbradshaw-ctrl/bare-metal-eo-matrix-app).
+
+## The nine operators
+
+Every state change decomposes into one of these. Dependency-ordered:
+
+| Op | Glyph | What it does |
+|----|-------|--------------|
+| NUL | ∅ | Observation (ephemeral) |
+| SIG | ○ | Attention (ephemeral) |
+| INS | ● | Instantiate — create a new entity with a content-addressed anchor |
+| SEG | ｜ | Segment — move an entity across a partition boundary |
+| CON | ⋈ | Connect — typed relationship between two anchors |
+| SYN | △ | Synthesize — merge inputs into a whole |
+| DEF | ⊢ | Define — set a value within the current frame |
+| EVA | ⊨ | Evaluate — test a particular against a general |
+| REC | ⊛ | Recontextualize — change what the data means |
+
+The seven stored operators become Matrix timeline events. The fold replays
+them deterministically into the current state.
 
 ## Development
 
@@ -21,23 +56,10 @@ npm run build    # tsc -b && vite build → ../docs
 npm test         # vitest
 ```
 
-## Architecture
+## Status
 
-- **`app/src/matrix/rest.ts`** — raw fetch helpers (no SDK). Login, room
-  join/create, `sendEvent`, `getMessages`, media upload/download. Direct
-  port of the sanity-check flow.
-- **`app/src/db/fold.ts`** — pure fold reducer. Applies an EO event to a
-  record map. Last-writer-wins by `ts`.
-- **`app/src/store/eo-store.ts`** — single Zustand store. Holds session,
-  events, materialized records. `dispatch()` is the one write path:
-  optimistic local apply → REST PUT → stamp `event_id` on ack.
-  `hydrate()` paginates `/messages` backward and folds.
-- **`app/src/components/`** — `Login`, `Layout`, `CollectionSidebar`,
-  `RecordList`, `RecordDrawer`. Nothing else.
-
-## Reference
-
-- `docs/sanity-check.html` — the original plain-HTML proof of the REST
-  flow. Open it directly in a browser; it logs every Matrix call.
-- `archive/v1` branch — the previous codebase (~70k LOC) preserved for
-  reference. Not deployed.
+The account/encryption/room-sharing foundation has been replaced with the
+bare-metal prototype. The MVP app on top covers: login + recovery key, room
+create/discover/invite, and a table view that emits INS/DEF/SEG events and
+re-renders from the fold. Airtable sync and other features will be rebuilt
+on this foundation in follow-up work.
