@@ -406,6 +406,77 @@ td input {
   border-top: 1px solid var(--border);
 }
 
+.filter-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 8px 20px;
+  border-bottom: 1px solid var(--border);
+  background: var(--bg);
+  min-height: 38px;
+  flex-wrap: wrap;
+}
+.filter-chips {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+.filter-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 3px 8px;
+  background: var(--accent-glow);
+  border: 1px solid var(--accent-dim);
+  border-radius: var(--radius);
+  font-size: 11px;
+  color: var(--text-bright);
+}
+.filter-chip button {
+  padding: 0 4px;
+  font-size: 10px;
+  line-height: 1;
+  background: transparent;
+  border: none;
+  color: var(--text-dim);
+}
+.filter-chip button:hover {
+  color: var(--red);
+  background: transparent;
+}
+.filter-value {
+  color: var(--accent);
+}
+.add-filter {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 3px 6px;
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+}
+.add-filter select,
+.add-filter input {
+  width: auto;
+  min-width: 90px;
+  padding: 3px 6px;
+  font-size: 11px;
+}
+.sort-control {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+.sort-control select {
+  width: auto;
+  min-width: 80px;
+  padding: 3px 6px;
+  font-size: 11px;
+}
+
 .view-tabs {
   display: inline-flex;
   border: 1px solid var(--border);

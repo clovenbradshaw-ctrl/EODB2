@@ -20,6 +20,8 @@ import { AddColumnForm } from './AddColumnForm';
 import { Cell } from './Cell';
 import { RecordDrawer } from './RecordDrawer';
 import { KanbanView } from './KanbanView';
+import { FilterBar } from './FilterBar';
+import { applyFilters, applySort, type Filter, type Sort } from '../query';
 
 type ViewKind = 'grid' | 'kanban';
 
@@ -55,6 +57,8 @@ export function TableView({ room, userId, onLog }: Props) {
     value: string;
   } | null>(null);
   const [selectedAnchor, setSelectedAnchor] = useState<string | null>(null);
+  const [filters, setFilters] = useState<Filter[]>([]);
+  const [sort, setSort] = useState<Sort | null>(null);
 
   useEffect(() => {
     const roomId = room.roomId;
@@ -66,6 +70,8 @@ export function TableView({ room, userId, onLog }: Props) {
     setSelectedAnchor(null);
     setViewKind('grid');
     setKanbanField(null);
+    setFilters([]);
+    setSort(null);
 
     (async () => {
       const store = new EventStore(roomId, getNamespace());
@@ -135,7 +141,9 @@ export function TableView({ room, userId, onLog }: Props) {
 
   const state = stateRef.current;
 
-  const rows: Entity[] = useMemo(() => {
+  // Base row set: every entity of the chosen type that isn't deleted.
+  // Sorted by creation time so unsorted views still feel stable.
+  const baseRows: Entity[] = useMemo(() => {
     void version;
     const list = Object.values(state.entities).filter(
       (e) => e._type === entityType && state.partitions[e._anchor] !== DELETED_PARTITION,
@@ -143,6 +151,13 @@ export function TableView({ room, userId, onLog }: Props) {
     list.sort((a, b) => (a._created ?? 0) - (b._created ?? 0));
     return list;
   }, [state, entityType, version]);
+
+  // Visible rows after running the query pipeline. Grid + Kanban both
+  // consume this — filters and sort apply uniformly across views.
+  const rows: Entity[] = useMemo(
+    () => applySort(applyFilters(baseRows, filters), sort),
+    [baseRows, filters, sort],
+  );
 
   // Columns come from three places: explicit schema (defSchema events),
   // ad-hoc keys actually present on rows, and the schema-implied order.
@@ -277,9 +292,19 @@ export function TableView({ room, userId, onLog }: Props) {
         <button onClick={handleAddRow}>+ Row</button>
         {viewKind === 'grid' && <AddColumnForm onAdd={handleAddColumn} onLog={onLog} />}
         <span className="dim small">
-          {rows.length} row(s) · {state.cursor ? new Date(state.cursor).toLocaleString() : '—'}
+          {rows.length}
+          {filters.length > 0 && ` / ${baseRows.length}`} row(s) ·{' '}
+          {state.cursor ? new Date(state.cursor).toLocaleString() : '—'}
         </span>
       </div>
+
+      <FilterBar
+        fields={columns}
+        filters={filters}
+        sort={sort}
+        onFiltersChange={setFilters}
+        onSortChange={setSort}
+      />
 
       {viewKind === 'kanban' && (
         <KanbanView
